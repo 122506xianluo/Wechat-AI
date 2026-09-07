@@ -1,0 +1,10 @@
+.venv/
+.env
+config.json
+data/*
+!data/.gitkeep
+__pycache__/
+.pytest_cache/
+.cache/
+*.pyc
+config.example.json
