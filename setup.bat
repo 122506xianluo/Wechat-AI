@@ -24,7 +24,7 @@ if errorlevel 1 goto install_error
 if not exist ".env" copy /y ".env.example" ".env" >nul
 if not exist "config.json" copy /y "config.example.json" "config.json" >nul
 if not exist "data" mkdir "data"
-echo Setup complete. Edit .env and config.json, then run start.bat.
+echo Setup complete. Run panel.bat to configure and start.
 exit /b 0
 
 :python_error

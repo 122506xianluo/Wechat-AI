@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WeChat AI 控制台</title>
+  <style>
+    :root {
+      --bg: #f3f5f7;
+      --card: #fff;
+      --text: #1f2328;
+      --muted: #667085;
+      --line: #e6e8eb;
+      --green: #07c160;
+      --green-dark: #06ad56;
+      --danger: #e54545;
+      --blue: #2b6de5;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 15px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif;
+      color: var(--text);
+      background: var(--bg);
+    }
+    .wrap { max-width: 920px; margin: 0 auto; padding: 24px 16px 48px; }
+    header {
+      display: flex; justify-content: space-between; align-items: flex-start;
+      gap: 16px; margin-bottom: 16px;
+    }
+    h1 { margin: 0; font-size: 22px; }
+    .sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
+    .status {
+      display: flex; align-items: center; gap: 8px;
+      background: var(--card); border: 1px solid var(--line);
+      border-radius: 999px; padding: 8px 14px; font-size: 13px;
+      white-space: nowrap;
+    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: #c5c9ce; }
+    .on .dot { background: var(--green); box-shadow: 0 0 0 4px rgba(7,193,96,.16); }
+    .card {
+      background: var(--card); border: 1px solid var(--line);
+      border-radius: 14px; padding: 18px; margin-bottom: 14px;
+    }
+    h2 { margin: 0 0 12px; font-size: 16px; }
+    label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 6px; }
+    input[type=text], input[type=password], input[type=number], textarea, select {
+      width: 100%; border: 1px solid var(--line); border-radius: 10px;
+      padding: 9px 11px; font: inherit; background: #fff;
+    }
+    textarea { min-height: 88px; resize: vertical; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    button {
+      border: 0; border-radius: 10px; padding: 9px 14px; font: inherit;
+      cursor: pointer; background: #eef1f4; color: var(--text);
+    }
+    button.primary { background: var(--green); color: #fff; }
+    button.primary:hover { background: var(--green-dark); }
+    button.danger { background: var(--danger); color: #fff; }
+    button.ghost { background: #e8eefc; color: var(--blue); }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    .hint { color: var(--muted); font-size: 12px; margin-top: 6px; }
+    .toast {
+      display: none; margin: 0 0 14px; padding: 10px 12px;
+      border-radius: 10px; font-size: 14px;
+    }
+    .toast.show { display: block; }
+    .toast.ok { background: #e9f8ef; color: #0d7a3e; }
+    .toast.err { background: #fdecec; color: #b42318; }
+    .modes { display: flex; gap: 14px; flex-wrap: wrap; margin: 8px 0 4px; }
+    .modes label { margin: 0; color: var(--text); }
+    details { margin-top: 8px; }
+    pre {
+      margin: 0; max-height: 280px; overflow: auto; background: #0f1720;
+      color: #d7e0ea; border-radius: 10px; padding: 12px; font-size: 12px;
+      white-space: pre-wrap; word-break: break-word;
+    }
+    .keyhint { font-size: 12px; color: var(--muted); margin-top: 4px; }
+    @media (max-width: 720px) {
+      .row, header { display: block; }
+      .status { margin-top: 10px; width: fit-content; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div>
+        <h1>WeChat AI 控制台</h1>
+        <div class="sub">本机页面，用来改配置、测试模型和启停自动回复。只监听本机。浏览器打不开时，看弹出的黑色窗口里的地址。</div>
+      </div>
+      <div id="badge" class="status"><span class="dot"></span><span id="badgeText">读取中</span></div>
+    </header>
+    <div id="toast" class="toast"></div>
+    <section class="card">
+      <h2>控制</h2>
+      <div class="actions">
+        <button class="primary" id="btnStart" onclick="startBot()">保存并启动</button>
+        <button class="danger" id="btnStop" onclick="stopBot()">停止</button>
+        <button onclick="saveCfg()">只保存</button>
+        <button class="ghost" onclick="testLlm()">测试模型</button>
+      </div>
+      <div class="hint">启动会真实回复。微信必须在这台 Windows 里保持可见前台；会话名必须和左侧列表完全一致。</div>
+    </section>
+    <section class="card">
+      <h2>模型</h2>
+      <label>接口地址 LLM_BASE_URL</label>
+      <input id="llm_base_url" type="text" placeholder="https://api.example.com/v1">
+      <label>API Key（留空表示不改已保存的密钥）</label>
+      <input id="llm_api_key" type="password" placeholder="sk-...">
+      <div class="keyhint" id="keyhint"></div>
+      <label>模型名</label>
+      <input id="llm_model" type="text" placeholder="your-model-name">
+    </section>
+    <section class="card">
+      <h2>回复对象</h2>
+      <div class="row">
+        <div>
+          <label>私聊（每行一个，通常是备注名）</label>
+          <textarea id="private_chats" placeholder="小暹罗"></textarea>
+        </div>
+        <div>
+          <label>群聊（每行一个）</label>
+          <textarea id="groups" placeholder="测试群"></textarea>
+        </div>
+      </div>
+      <label>机器人群昵称 bot_names（mention 模式必填，必须和群里显示完全一致）</label>
+      <textarea id="bot_names" placeholder="海豹色暹罗"></textarea>
+    </section>
+    <section class="card">
+      <h2>角色与群触发</h2>
+      <div class="modes">
+        <label><input type="radio" name="group_mode" value="mention"> @昵称才回</label>
+        <label><input type="radio" name="group_mode" value="prefix"> 指定前缀才回</label>
+        <label><input type="radio" name="group_mode" value="all"> 群内全部文本都回</label>
+      </div>
+      <label>群前缀 group_prefix</label>
+      <input id="group_prefix" type="text">
+      <label>系统提示 / 角色</label>
+      <textarea id="system_prompt" style="min-height:120px"></textarea>
+      <details>
+        <summary>高级</summary>
+        <div class="row">
+          <div>
+            <label>上下文轮数</label>
+            <input id="context_turns" type="number" min="1" max="50">
+          </div>
+          <div>
+            <label>轮询秒数</label>
+            <input id="poll_seconds" type="number" min="0.5" max="60" step="0.1">
+          </div>
+          <div>
+            <label>模型超时秒</label>
+            <input id="timeout_seconds" type="number" min="1" max="180">
+          </div>
+          <div>
+            <label>max_tokens</label>
+            <input id="max_tokens" type="number" min="1" max="8000">
+          </div>
+          <div>
+            <label>最大输入字符</label>
+            <input id="max_input_chars" type="number" min="1" max="32000">
+          </div>
+          <div>
+            <label>最大回复字符</label>
+            <input id="max_reply_chars" type="number" min="1" max="4000">
+          </div>
+        </div>
+      </details>
+    </section>
+    <section class="card">
+      <h2>日志</h2>
+      <pre id="log">暂无日志</pre>
+    </section>
+  </div>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const listFields = ["private_chats", "groups", "bot_names"];
+    const numFields = ["poll_seconds", "context_turns", "max_input_chars", "max_reply_chars", "timeout_seconds", "max_tokens"];
+    let loaded = false;
+
+    function toast(text, ok) {
+      const el = $("toast");
+      el.textContent = text;
+      el.className = "toast show " + (ok ? "ok" : "err");
+    }
+
+    function lines(id) {
+      return $(id).value.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+    }
+
+    function payload() {
+      const mode = document.querySelector("input[name=group_mode]:checked");
+      const data = {
+        llm_base_url: $("llm_base_url").value.trim(),
+        llm_api_key: $("llm_api_key").value.trim(),
+        llm_model: $("llm_model").value.trim(),
+        private_chats: lines("private_chats"),
+        groups: lines("groups"),
+        bot_names: lines("bot_names"),
+        group_mode: mode ? mode.value : "mention",
+        group_prefix: $("group_prefix").value,
+        system_prompt: $("system_prompt").value,
+      };
+      for (const key of numFields) data[key] = Number($(key).value);
+      return data;
+    }
+
+    async function api(path, options) {
+      const res = await fetch(path, Object.assign({
+        headers: {"Content-Type": "application/json"}
+      }, options));
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.ok === false) throw new Error(data.error || ("HTTP " + res.status));
+      return data;
+    }
+
+    function applyState(data, fillForm) {
+      const running = !!data.running;
+      $("badge").className = "status" + (running ? " on" : "");
+      $("badgeText").textContent = running
+        ? ("运行中" + (data.pid ? "  PID " + data.pid : "") + (data.stop_requested ? "  正在停止" : ""))
+        : "未运行";
+      $("btnStart").disabled = running;
+      $("btnStop").disabled = !running;
+      if (fillForm) {
+        $("llm_base_url").value = data.llm_base_url || "";
+        $("llm_model").value = data.llm_model || "";
+        $("llm_api_key").value = "";
+        $("keyhint").textContent = data.llm_api_key_set
+          ? ("已保存密钥：" + (data.llm_api_key_masked || "****"))
+          : "还没有保存密钥";
+        const cfg = data.config || {};
+        for (const key of listFields) $(key).value = (cfg[key] || []).join("\n");
+        for (const key of numFields) $(key).value = cfg[key];
+        $("group_prefix").value = cfg.group_prefix || "/ai ";
+        $("system_prompt").value = cfg.system_prompt || "";
+        const mode = cfg.group_mode || "mention";
+        const radio = document.querySelector("input[name=group_mode][value='" + mode + "']");
+        if (radio) radio.checked = true;
+        if (data.config_error) toast("当前配置有问题：" + data.config_error, false);
+      }
+      $("log").textContent = data.log || "暂无日志";
+      if (fillForm) loaded = true;
+    }
+
+    async function refresh(fillForm) {
+      const data = await api(fillForm ? "/api/state" : "/api/log");
+      applyState(data, fillForm);
+    }
+
+    async function saveCfg() {
+      try {
+        const data = await api("/api/save", {method: "POST", body: JSON.stringify(payload())});
+        toast(data.message || "已保存", true);
+        $("llm_api_key").value = "";
+        await refresh(true);
+      } catch (err) {
+        toast(err.message, false);
+      }
+    }
+
+    async function startBot() {
+      try {
+        const data = await api("/api/start", {method: "POST", body: JSON.stringify(payload())});
+        toast(data.message || "已启动", true);
+        $("llm_api_key").value = "";
+        applyState(data, false);
+        await refresh(true);
+      } catch (err) {
+        toast(err.message, false);
+        refresh(false);
+      }
+    }
+
+    async function stopBot() {
+      try {
+        const data = await api("/api/stop", {method: "POST", body: "{}"});
+        toast(data.message || "已停止", true);
+        applyState(data, false);
+        await refresh(false);
+      } catch (err) {
+        toast(err.message, false);
+      }
+    }
+
+    async function testLlm() {
+      try {
+        toast("正在测试模型...", true);
+        const data = await api("/api/test", {method: "POST", body: JSON.stringify(payload())});
+        toast((data.message || "模型可用") + (data.reply ? "  回复：" + data.reply : ""), true);
+      } catch (err) {
+        toast(err.message, false);
+      }
+    }
+
+    refresh(true).catch(err => toast(err.message, false));
+    setInterval(() => { if (loaded) refresh(false).catch(() => {}); }, 2000);
+  </script>
+</body>
+</html>

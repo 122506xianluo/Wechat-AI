@@ -1,3 +1,4 @@
 pywechat127==1.9.8; sys_platform == "win32"
 httpx==0.28.1
 python-dotenv==1.1.1
+flask==3.0.3

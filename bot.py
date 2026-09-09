@@ -95,14 +95,14 @@ class LLMSettings:
         parsed = urlparse(self.base_url)
         local = parsed.hostname in ("127.0.0.1", "localhost", "::1")
         if not self.base_url or not self.model:
-            raise ValueError("请填写 .env 中的 LLM_BASE_URL 和 LLM_MODEL")
+            raise ValueError("请填写 LLM_BASE_URL 和 LLM_MODEL")
         if (not parsed.hostname or parsed.username or parsed.password
                 or parsed.query or parsed.fragment):
             raise ValueError("LLM_BASE_URL 格式不安全或无效")
         if parsed.scheme != "https" and not (local and parsed.scheme == "http"):
             raise ValueError("模型接口必须使用 HTTPS，本机 localhost HTTP 除外")
         if not local and not self.api_key:
-            raise ValueError("请填写 .env 中的 LLM_API_KEY")
+            raise ValueError("请填写 LLM_API_KEY")
 
     @property
     def endpoint(self):
