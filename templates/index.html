@@ -171,7 +171,18 @@
     </section>
     <section class="card">
       <h2>日志</h2>
-      <pre id="log">暂无日志</pre>
+      <details open>
+        <summary>机器人运行日志</summary>
+        <pre id="log">暂无日志</pre>
+      </details>
+      <details>
+        <summary>安装日志</summary>
+        <pre id="setupLog">暂无安装日志</pre>
+      </details>
+      <details>
+        <summary>控制台日志</summary>
+        <pre id="panelLog">暂无控制台日志</pre>
+      </details>
     </section>
   </div>
   <script>
@@ -241,7 +252,9 @@
         if (radio) radio.checked = true;
         if (data.config_error) toast("当前配置有问题：" + data.config_error, false);
       }
-      $("log").textContent = data.log || "暂无日志";
+      $("log").textContent = data.log || "暂无机器人运行日志";
+      $("setupLog").textContent = data.setup_log || "暂无安装日志";
+      $("panelLog").textContent = data.panel_log || "暂无控制台日志";
       if (fillForm) loaded = true;
     }
 

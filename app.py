@@ -29,6 +29,7 @@ CONFIG_FILE = ROOT / "config.json"
 EXAMPLE_CONFIG = ROOT / "config.example.json"
 LOG_FILE = DATA / "bot.log"
 PANEL_LOG = DATA / "panel.log"
+SETUP_LOG = DATA / "setup.log"
 HOST = "127.0.0.1"
 PORT = 18787
 URL = f"http://{HOST}:{PORT}"
@@ -182,11 +183,23 @@ def settings_from_payload(data: dict) -> LLMSettings:
     return settings
 
 
-def tail_log(max_lines: int = 160) -> str:
-    if not LOG_FILE.exists():
+def tail_file(path: Path, max_lines: int = 160) -> str:
+    if not path.exists():
         return ""
-    lines = LOG_FILE.read_text(encoding="utf-8", errors="replace").splitlines()
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     return "\n".join(lines[-max_lines:])
+
+
+def tail_log(max_lines: int = 160) -> str:
+    return tail_file(LOG_FILE, max_lines)
+
+
+def setup_log(max_lines: int = 160) -> str:
+    return tail_file(SETUP_LOG, max_lines)
+
+
+def panel_log(max_lines: int = 160) -> str:
+    return tail_file(PANEL_LOG, max_lines)
 
 
 def run_check():
@@ -219,6 +232,8 @@ def api_state():
         "llm_api_key_set": bool(env.get("LLM_API_KEY", "")),
         "llm_api_key_masked": mask_secret(env.get("LLM_API_KEY", "")),
         "log": tail_log(),
+        "setup_log": setup_log(),
+        "panel_log": panel_log(),
         "url": URL,
     })
 
@@ -231,6 +246,8 @@ def api_log():
         "pid": read_pid(BOT_PID),
         "stop_requested": STOP_FILE.exists(),
         "log": tail_log(),
+        "setup_log": setup_log(),
+        "panel_log": panel_log(),
     })
 
 

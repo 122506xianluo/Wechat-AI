@@ -1,20 +1,16 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-if not exist ".venv\Scripts\python.exe" (
-  echo Run setup.bat first.
-  pause
-  exit /b 1
+where py >nul 2>nul
+if not errorlevel 1 (
+  py -3.10 bootstrap.py
+  exit /b %errorlevel%
 )
-".venv\Scripts\python.exe" -c "import flask" 2>nul
-if errorlevel 1 (
-  echo Installing panel dependency...
-  ".venv\Scripts\python.exe" -m pip install -r requirements.txt
-  if errorlevel 1 (
-    echo Dependency installation failed. Run setup.bat.
-    pause
-    exit /b 1
-  )
+where python >nul 2>nul
+if not errorlevel 1 (
+  python bootstrap.py
+  exit /b %errorlevel%
 )
-echo Starting local control panel...
-start "WeChat AI Panel" ".venv\Scripts\python.exe" "%CD%\app.py"
+echo Python 3.10 x64 was not found. Install Python 3.10.11 and retry.
+pause
+exit /b 1
