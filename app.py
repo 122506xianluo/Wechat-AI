@@ -18,6 +18,7 @@ import httpx
 from flask import Flask, jsonify, render_template, request
 
 from bot import Config, LLMSettings
+from storage import Storage
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
@@ -30,6 +31,7 @@ EXAMPLE_CONFIG = ROOT / "config.example.json"
 LOG_FILE = DATA / "bot.log"
 PANEL_LOG = DATA / "panel.log"
 SETUP_LOG = DATA / "setup.log"
+DB_FILE = DATA / "wechat_ai.db"
 HOST = "127.0.0.1"
 PORT = 18787
 URL = f"http://{HOST}:{PORT}"
@@ -40,13 +42,34 @@ DETACHED = 0x00000008 | 0x00000200 | CREATE_NO_WINDOW
 
 app = Flask(__name__)
 app.json.ensure_ascii = False
+_storage = None
+_storage_error = None
+
+
+def get_storage() -> Storage:
+    global _storage, _storage_error
+    if _storage is None:
+        try:
+            _storage = Storage(ROOT)
+            _storage_error = None
+        except Exception as exc:
+            _storage_error = str(exc)
+            raise
+    return _storage
+
+
+def storage_state() -> dict:
+    try:
+        return get_storage().stats()
+    except Exception as exc:
+        return {"ok": False, "path": str(DB_FILE), "error": str(exc)}
 
 
 def venv_python(windowed: bool = False) -> Path:
     name = "pythonw.exe" if windowed else "python.exe"
     path = ROOT / ".venv" / "Scripts" / name
     if not path.exists():
-        raise RuntimeError("请先运行 setup.bat")
+        raise RuntimeError("请先双击 panel.bat 完成初始化")
     return path
 
 
@@ -235,6 +258,7 @@ def api_state():
         "setup_log": setup_log(),
         "panel_log": panel_log(),
         "url": URL,
+        "storage": storage_state(),
     })
 
 
@@ -248,7 +272,44 @@ def api_log():
         "log": tail_log(),
         "setup_log": setup_log(),
         "panel_log": panel_log(),
+        "storage": storage_state(),
     })
+
+
+@app.get("/api/storage/chats")
+def api_storage_chats():
+    try:
+        storage = get_storage()
+        return jsonify({"ok": True, "chats": storage.list_chats(), "stats": storage.stats()})
+    except Exception as exc:
+        return fail(str(exc), 500)
+
+
+@app.post("/api/storage/clear-chat")
+def api_storage_clear_chat():
+    if bot_running():
+        return fail("请先停止机器人，再清空会话上下文")
+    data = request.get_json(silent=True) or {}
+    kind = str(data.get("kind", "")).strip()
+    name = str(data.get("name", "")).strip()
+    if kind not in ("private", "group") or not name:
+        return fail("请选择有效的好友或群聊")
+    try:
+        deleted = get_storage().clear_chat(kind, name)
+        return jsonify({"ok": True, "message": f"已清空 {deleted} 条记录", "storage": storage_state()})
+    except Exception as exc:
+        return fail(str(exc), 500)
+
+
+@app.post("/api/storage/clear-all")
+def api_storage_clear_all():
+    if bot_running():
+        return fail("请先停止机器人，再清空会话上下文")
+    try:
+        deleted = get_storage().clear_all_history()
+        return jsonify({"ok": True, "message": f"已清空 {deleted} 条记录", "storage": storage_state()})
+    except Exception as exc:
+        return fail(str(exc), 500)
 
 
 @app.post("/api/save")

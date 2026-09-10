@@ -170,6 +170,17 @@
       </details>
     </section>
     <section class="card">
+      <h2>会话持久化</h2>
+      <div class="hint">上下文保存在本机 SQLite；数据库历史可以持续增长，但每次请求模型只读取最近的上下文轮数。</div>
+      <div id="storageSummary" class="hint">正在读取数据库状态...</div>
+      <div class="actions" style="margin-top:10px">
+        <button onclick="clearSelectedChat()">清空指定会话上下文</button>
+        <button class="danger" onclick="clearAllHistory()">清空全部上下文</button>
+      </div>
+      <label>要清空的会话</label>
+      <select id="storageChat"><option value="">暂无会话</option></select>
+    </section>
+    <section class="card">
       <h2>日志</h2>
       <details open>
         <summary>机器人运行日志</summary>
@@ -255,12 +266,75 @@
       $("log").textContent = data.log || "暂无机器人运行日志";
       $("setupLog").textContent = data.setup_log || "暂无安装日志";
       $("panelLog").textContent = data.panel_log || "暂无控制台日志";
+      applyStorage(data.storage || {});
       if (fillForm) loaded = true;
+    }
+
+    function formatBytes(value) {
+      const n = Number(value || 0);
+      if (n < 1024) return n + " B";
+      if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+      return (n / 1024 / 1024).toFixed(1) + " MB";
+    }
+
+    async function applyStorage(storage) {
+      if (!storage.ok) {
+        $("storageSummary").textContent = "数据库不可用：" + (storage.error || "未知错误");
+        return;
+      }
+      $("storageSummary").textContent =
+        "已启用 SQLite · 会话 " + storage.chat_count + " · 消息 " + storage.message_count +
+        " · 失败 " + storage.failed_count + " · 状态不明 " + storage.unknown_count +
+        " · 文件 " + formatBytes(storage.size_bytes);
+      try {
+        const data = await api("/api/storage/chats");
+        const select = $("storageChat");
+        const current = select.value;
+        select.innerHTML = "";
+        if (!data.chats.length) {
+          select.add(new Option("暂无会话", ""));
+          return;
+        }
+        for (const chat of data.chats) {
+          const label = (chat.kind === "group" ? "群聊：" : "私聊：") + chat.name +
+            "（" + chat.message_count + " 条）";
+          select.add(new Option(label, chat.kind + "\t" + chat.name));
+        }
+        if ([...select.options].some(option => option.value === current)) select.value = current;
+      } catch (err) {
+        $("storageSummary").textContent += "（会话列表读取失败）";
+      }
     }
 
     async function refresh(fillForm) {
       const data = await api(fillForm ? "/api/state" : "/api/log");
       applyState(data, fillForm);
+    }
+
+    async function clearSelectedChat() {
+      const value = $("storageChat").value;
+      if (!value) return toast("请先选择会话", false);
+      const [kind, ...parts] = value.split("\t");
+      const name = parts.join("\t");
+      if (!confirm("确定清空“" + name + "”的全部上下文吗？")) return;
+      try {
+        const data = await api("/api/storage/clear-chat", {
+          method: "POST", body: JSON.stringify({kind, name})
+        });
+        toast(data.message || "已清空", true);
+        await refresh(true);
+      } catch (err) { toast(err.message, false); }
+    }
+
+    async function clearAllHistory() {
+      if (!confirm("确定清空所有好友和群聊的全部上下文吗？此操作不可恢复。")) return;
+      try {
+        const data = await api("/api/storage/clear-all", {
+          method: "POST", body: "{}"
+        });
+        toast(data.message || "已清空", true);
+        await refresh(true);
+      } catch (err) { toast(err.message, false); }
     }
 
     async function saveCfg() {

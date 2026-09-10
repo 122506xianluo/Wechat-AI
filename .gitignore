@@ -2,6 +2,7 @@
 .env
 config.json
 data/*
+data/wechat_ai.db*
 !data/.gitkeep
 __pycache__/
 .pytest_cache/

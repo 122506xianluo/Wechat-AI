@@ -6,7 +6,7 @@ inside the guest. The host computer may continue to be used independently.
 from __future__ import annotations
 
 import argparse
-from collections import Counter, defaultdict, deque
+from collections import Counter
 from dataclasses import dataclass, field, fields
 from hashlib import sha256
 import json
@@ -18,6 +18,8 @@ import sys
 import time
 from urllib.parse import urlparse
 import uuid
+
+from storage import Storage
 
 import httpx
 from dotenv import load_dotenv
@@ -32,6 +34,10 @@ class BotError(RuntimeError):
 
 class FocusLost(BotError):
     """Safe interruption before reply text has been inserted."""
+
+
+class SendUncertain(BotError):
+    """The answer may have been inserted or sent; never retry automatically."""
 
 
 @dataclass
@@ -132,6 +138,7 @@ class Message:
     chat: str
     kind: str
     text: str
+    source_key: str = ""
 
 
 @dataclass(frozen=True)
@@ -377,7 +384,7 @@ class WeChatDesktop:
                     continue
                 if direction != "incoming":
                     continue
-                messages.append(Message(uuid.uuid4().hex, session.name, kind, row.window_text()))
+                messages.append(Message(uuid.uuid4().hex, session.name, kind, row.window_text(), source_key=row_token(row.class_name(), row.window_text())))
         return messages
 
     def send(self, message: Message, answer: str):
@@ -399,13 +406,13 @@ class WeChatDesktop:
         edit.set_text(answer)
         if (not self.is_foreground() or self.current() != (message.chat, message.kind)
                 or edit.window_text() != answer):
-            raise BotError("填入回答后状态不明；请检查草稿，不自动重发")
+            raise SendUncertain("填入回答后状态不明；请检查草稿，不自动重发")
         import pyautogui
         pyautogui.hotkey("alt", "s")
         time.sleep(.3)
         if (not self.is_foreground() or self.current() != (message.chat, message.kind)
                 or edit.window_text() != ""):
-            raise BotError("发送结果不明；请人工检查，不自动重发")
+            raise SendUncertain("发送结果不明；请人工检查，不自动重发")
 
 
 class ChatLLM:
@@ -461,8 +468,11 @@ class Bot:
         self.desktop = WeChatDesktop(cfg)
         self.llm = ChatLLM(settings, cfg)
         self.policy = Policy(cfg)
-        self.history: dict[str, deque[dict]] = defaultdict(
-            lambda: deque(maxlen=cfg.context_turns * 2))
+        self.storage = Storage(root)
+        recovered = self.storage.recover_incomplete()
+        if recovered:
+            log.warning("recovered_incomplete=%s marked=failed", recovered)
+        self.storage.register_targets(cfg.private_chats, cfg.groups)
 
     def stopped(self):
         return (self.root / "STOP").exists()
@@ -497,18 +507,51 @@ class Bot:
                     question = self.policy.prompt(message)
                     if question is None:
                         continue
-                    session = f"{message.kind}\0{message.chat}"
+                    incoming_id = self.storage.add_incoming(
+                        message.kind, message.chat, question, source_key=message.source_key)
                     log.info("llm_start event=%s kind=%s", message.id[:8], message.kind)
-                    answer = self.llm.reply(question, list(self.history[session]))
+                    try:
+                        history = self.storage.history(
+                            message.kind, message.chat, self.cfg.context_turns)
+                        answer = self.llm.reply(question, history)
+                    except Exception as exc:
+                        self.storage.mark_message(
+                            incoming_id, "failed", f"llm:{type(exc).__name__}")
+                        log.exception("llm_failed event=%s", message.id[:8])
+                        continue
                     if self.stopped() or not self.desktop.is_foreground():
+                        self.storage.mark_message(
+                            incoming_id, "failed", "stopped_or_focus_lost_before_send")
                         log.info("discarded event=%s reason=stopped_or_focus_lost", message.id[:8])
                         ready = False
                         focused_since = None
                         break
-                    self.desktop.send(message, answer)
+                    try:
+                        self.desktop.send(message, answer)
+                    except SendUncertain as exc:
+                        self.storage.mark_message(
+                            incoming_id, "unknown", "send_result_unknown")
+                        self.storage.add_assistant(
+                            message.kind, message.chat, answer, status="unknown",
+                            error_message=type(exc).__name__)
+                        raise
+                    except FocusLost as exc:
+                        self.storage.mark_message(
+                            incoming_id, "failed", "focus_lost_during_send")
+                        self.storage.add_assistant(
+                            message.kind, message.chat, answer, status="failed",
+                            error_message=type(exc).__name__)
+                        raise
+                    except Exception as exc:
+                        self.storage.mark_message(
+                            incoming_id, "failed", "send_failed")
+                        self.storage.add_assistant(
+                            message.kind, message.chat, answer, status="failed",
+                            error_message=type(exc).__name__)
+                        raise
+                    self.storage.complete_turn(
+                        incoming_id, message.kind, message.chat, answer)
                     log.info("submitted event=%s response_chars=%s", message.id[:8], len(answer))
-                    self.history[session].append({"role": "user", "content": question})
-                    self.history[session].append({"role": "assistant", "content": answer})
             except FocusLost:
                 ready = False
                 focused_since = None
@@ -520,6 +563,7 @@ class Bot:
 
     def close(self):
         self.llm.close()
+        self.storage.close()
 
 
 def configure_logging(root: Path):
