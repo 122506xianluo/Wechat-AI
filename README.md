@@ -10,6 +10,17 @@
 - 会话记录保存在 data/wechat_ai.db，支持重启后恢复上下文
 - 推荐用本地网页控制台配置和启停，不要做成需要联网的公网服务
 
+## 扩展实施状态（当前步骤 3）
+
+本分支已实现 SQLite v2、身份与权限、审计和本机管理入口。**步骤 4–11 尚未实现；每一步完成 CI 和限定微信验收后再继续。** 详见 [实施状态与门禁](docs/steps-03-11-status.md) 和 [步骤 3 真实验收清单](docs/acceptance-step-03.md)。
+
+- 私聊只处理现有配置白名单；群中首次看到的昵称为 `pending`，在「身份与权限」核对并批准后才处理新的消息。
+- `blocked` 对普通问题及命令都静默，不调用 LLM。Web 修改权限会在下一条消息/发送前复查时生效。
+- 仅开放 `/ai help`、`/ai status`、`/ai reset`；群 status 仅已批准 admin 可用。群成员独立上下文尚未实现，群 reset 暂不删除历史。
+- 本步 Web 是 **127.0.0.1 临时 owner**，尚无密码登录；已加入 Host/Origin/CSRF 防护，但不能开放公网或代理转发。页面重启后需刷新以更新 CSRF token。
+- 昵称不是稳定微信 ID；目前没有自动同名检测。不要授权重名或疑似冒名成员，等待第 6 步的诊断/消歧功能。
+- 首次打开新版会自动备份并升级数据库，不清除已有历史。备份位于 `data/backups/`，属于私密数据。
+
 ## 目录
 
     panel.bat              唯一启动入口：安装依赖并打开本机控制台
@@ -21,6 +32,12 @@
     .env.example           LLM 配置模板
     data/                  PID、锁、日志和本地 SQLite 数据库（自动生成）
     storage.py             SQLite 数据持久化与会话历史仓库
+    migrations.py          顺序迁移、备份、跨进程锁与完整性校验
+    permissions.py         身份解析、权限范围与管理服务
+    commands.py            微信低风险命令（不走 LLM）
+    audit.py               事务内审计记录
+    tests/                 合成数据的离线测试，提交 Git
+    .github/workflows/     Windows Python 3.10 CI
 
 ## 首次使用
 

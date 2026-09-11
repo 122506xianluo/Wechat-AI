@@ -6,6 +6,7 @@ import logging
 import os
 from dataclasses import asdict, fields
 from pathlib import Path
+import secrets
 import socket
 import subprocess
 import sys
@@ -13,11 +14,13 @@ import threading
 import time
 import traceback
 import webbrowser
+from urllib.parse import urlsplit
 
 import httpx
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, g, jsonify, render_template, request
 
 from bot import Config, LLMSettings
+from permissions import LOCAL_OWNER, PermissionDenied, Permissions
 from storage import Storage
 
 ROOT = Path(__file__).resolve().parent
@@ -42,6 +45,8 @@ DETACHED = 0x00000008 | 0x00000200 | CREATE_NO_WINDOW
 
 app = Flask(__name__)
 app.json.ensure_ascii = False
+app.config["MAX_CONTENT_LENGTH"] = 128 * 1024
+app.config["LOCAL_CSRF_TOKEN"] = secrets.token_urlsafe(32)
 _storage = None
 _storage_error = None
 
@@ -50,7 +55,15 @@ def get_storage() -> Storage:
     global _storage, _storage_error
     if _storage is None:
         try:
-            _storage = Storage(ROOT)
+            candidate = Storage(ROOT)
+            # Stage 3 keeps the explicit config whitelist; stage 5 will import it
+            # once and make SQLite authoritative. Never read or persist .env here.
+            if CONFIG_FILE.exists():
+                raw = json.loads(CONFIG_FILE.read_text(encoding="utf-8-sig"))
+                cfg = config_from_payload(raw)
+                candidate.register_targets(cfg.private_chats, cfg.groups)
+                Permissions(candidate).register_private_targets(cfg.private_chats)
+            _storage = candidate
             _storage_error = None
         except Exception as exc:
             _storage_error = str(exc)
@@ -227,16 +240,133 @@ def panel_log(max_lines: int = 160) -> str:
 
 def run_check():
     result = subprocess.run(
-        [str(venv_python(False)), str(ROOT / "bot.py"), "--check"],
+        [str(venv_python(False)), "-X", "utf8", str(ROOT / "bot.py"), "--check"],
         cwd=str(ROOT), capture_output=True, text=True,
         encoding="utf-8", errors="replace", creationflags=CREATE_NO_WINDOW)
     output = (result.stderr or result.stdout or "").strip()
     return result.returncode == 0, output
 
 
+
+@app.before_request
+def enforce_local_owner():
+    """Temporary stage-3 owner, NOT a substitute for stage-8 account login.
+
+    Reject DNS rebinding, cross-site requests and non-loopback callers even when
+    a reverse proxy is accidentally placed in front of the local Flask server.
+    Forwarded/X-Forwarded headers never confer authority.
+    """
+    try:
+        host = urlsplit(request.host_url)
+        valid_host = (host.hostname == "127.0.0.1" and host.scheme == "http"
+                      and host.username is None and host.password is None
+                      and (host.port is None or 1 <= host.port <= 65535))
+    except ValueError:
+        valid_host = False
+    if request.remote_addr != "127.0.0.1" or not valid_host:
+        return fail("控制台只允许 127.0.0.1 本机访问", 403)
+    if request.headers.get("Forwarded") or request.headers.get("X-Forwarded-For"):
+        return fail("控制台不接受代理转发", 403)
+    origin = request.headers.get("Origin")
+    if (origin is not None and origin != request.host_url.rstrip("/")) or request.headers.get(
+            "Sec-Fetch-Site") == "cross-site":
+        return fail("不允许跨站控制本机机器人", 403)
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        token = request.headers.get("X-CSRF-Token", "")
+        if not secrets.compare_digest(token.encode("utf-8"), app.config["LOCAL_CSRF_TOKEN"].encode("utf-8")):
+            return fail("页面验证已过期，请刷新控制台", 403)
+        if not request.is_json or not isinstance(request.get_json(silent=True), dict):
+            return fail("请求必须是 JSON 对象", 400)
+    g.actor = LOCAL_OWNER
+
+
+@app.after_request
+def local_security_headers(response):
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Content-Security-Policy"] = "frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+    return response
+
+
+def positive_id(value, name: str = "id") -> int:
+    if type(value) is not int or value < 1:
+        raise ValueError(f"{name} 必须是正整数")
+    return value
+
+
+def management_error(exc):
+    if isinstance(exc, PermissionDenied):
+        return fail(str(exc), 403)
+    if isinstance(exc, (ValueError, TypeError)):
+        return fail(str(exc), 400)
+    logging.exception("management_error type=%s", type(exc).__name__)
+    return fail("管理操作失败，请查看本机日志", 500)
+
+
+@app.get("/api/v1/principals")
+def api_principals():
+    try:
+        query = request.args.get("q", "")
+        if len(query) > 256:
+            raise ValueError("搜索文本过长")
+        service = Permissions(get_storage())
+        return jsonify(ok=True, principals=service.list_principals(query),
+                       revision=service.revision(), temporary_local_owner=True)
+    except Exception as exc:
+        return management_error(exc)
+
+
+@app.post("/api/v1/principals/<int:principal_id>/status")
+def api_principal_status(principal_id: int):
+    try:
+        data = request.get_json()
+        status = data.get("status")
+        if status == "active" and data.get("confirm_identity") is not True:
+            raise ValueError("批准前必须人工确认身份和群昵称无冲突")
+        Permissions(get_storage()).set_status(principal_id, status, actor=g.actor)
+        return jsonify(ok=True, message="身份状态已更新，下一条新消息生效")
+    except Exception as exc:
+        return management_error(exc)
+
+
+@app.post("/api/v1/permissions")
+def api_permissions():
+    try:
+        data = request.get_json()
+        principal_id = positive_id(data.get("principal_id"), "principal_id")
+        scope = data.get("scope")
+        if scope not in ("global", "chat"):
+            raise ValueError("scope 必须是 global 或 chat")
+        chat_id = positive_id(data.get("chat_id"), "chat_id") if scope == "chat" else None
+        service = Permissions(get_storage())
+        operation = data.get("operation", "set")
+        if operation == "set":
+            service.set_grant(principal_id, data.get("access_level"), chat_id, actor=g.actor)
+        elif operation == "revoke":
+            service.remove_grant(principal_id, chat_id, actor=g.actor)
+        else:
+            raise ValueError("权限操作无效")
+        return jsonify(ok=True, message="权限已更新；显式 blocked 始终优先", revision=service.revision())
+    except Exception as exc:
+        return management_error(exc)
+
+
+@app.get("/api/v1/audit")
+def api_audit():
+    try:
+        before = request.args.get("before_id")
+        before_id = positive_id(int(before)) if before is not None else None
+        limit = positive_id(int(request.args.get("limit", "100")))
+        return jsonify(ok=True, events=Permissions(get_storage()).list_audit(before_id, limit))
+    except Exception as exc:
+        return management_error(exc)
+
+
 @app.get("/")
 def index():
-    return render_template("index.html")
+    return render_template("index.html", csrf_token=app.config["LOCAL_CSRF_TOKEN"])
 
 
 @app.get("/api/state")
@@ -295,7 +425,7 @@ def api_storage_clear_chat():
     if kind not in ("private", "group") or not name:
         return fail("请选择有效的好友或群聊")
     try:
-        deleted = get_storage().clear_chat(kind, name)
+        deleted = get_storage().clear_chat(kind, name, actor_id=g.actor.principal_id, source="web")
         return jsonify({"ok": True, "message": f"已清空 {deleted} 条记录", "storage": storage_state()})
     except Exception as exc:
         return fail(str(exc), 500)
@@ -305,8 +435,10 @@ def api_storage_clear_chat():
 def api_storage_clear_all():
     if bot_running():
         return fail("请先停止机器人，再清空会话上下文")
+    if request.get_json().get("confirm") != "clear-all":
+        return fail("清空全部上下文需要二次确认")
     try:
-        deleted = get_storage().clear_all_history()
+        deleted = get_storage().clear_all_history(actor_id=g.actor.principal_id, source="web")
         return jsonify({"ok": True, "message": f"已清空 {deleted} 条记录", "storage": storage_state()})
     except Exception as exc:
         return fail(str(exc), 500)

@@ -1,0 +1,20 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra --strict-markers"
+markers = ["live: requires explicit --run-live and a dedicated approved WeChat test account"]
+
+[tool.ruff]
+target-version = "py310"
+extend-exclude = [".venv", "data", ".cache"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
+[tool.coverage.run]
+source = ["storage", "migrations", "permissions", "commands", "audit"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 80

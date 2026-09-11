@@ -18,6 +18,8 @@ import time
 from urllib.parse import urlparse
 import uuid
 
+from commands import Commands, parse_command
+from permissions import Permissions
 from storage import Storage
 
 import httpx
@@ -138,6 +140,9 @@ class Message:
     kind: str
     text: str
     source_key: str = ""
+    sender_name: str = ""
+    direction: str = "unknown"
+    direction_verified: bool = False
 
 
 @dataclass(frozen=True)
@@ -284,16 +289,16 @@ def uia_row_direction(row) -> str:
         rect = _control_rect(ctrl)
         if rect is None:
             continue
-        l, t, r, b = rect
-        cw, ch = r - l, b - t
+        ctrl_left, ctrl_top, ctrl_right, ctrl_bottom = rect
+        cw, ch = ctrl_right - ctrl_left, ctrl_bottom - ctrl_top
         if cw <= 8 or ch <= 8 or cw > max_w or ch > max_h:
             continue
         try:
             name = (ctrl.window_text() or "").strip()
         except Exception:
             name = ""
-        near_left = (l - left) <= edge
-        near_right = (right - r) <= edge
+        near_left = (ctrl_left - left) <= edge
+        near_right = (right - ctrl_right) <= edge
         if near_left and not near_right:
             left_hits += 1
             if name:
@@ -389,7 +394,8 @@ def row_direction(row, scale: float = 1.0, kind: str = "private",
         if sender:
             normalized = _normalized_wechat_name(sender)
             mine = {_normalized_wechat_name(name) for name in bot_names}
-            return "outgoing" if normalized in mine else "incoming"
+            if normalized in mine:
+                return "outgoing"
     direction = uia_row_direction(row)
     if direction in ("incoming", "outgoing"):
         return direction
@@ -556,30 +562,21 @@ class WeChatDesktop:
                 self.require_foreground()
                 text = row.window_text()
                 source_key = row_token(row.class_name(), text)
-                candidate = Message(
-                    uuid.uuid4().hex, session.name, kind, text,
-                    source_key=source_key)
                 try:
-                    direction = row_direction(
-                        row, self.scale, kind, self.cfg.bot_names)
+                    direction = row_direction(row, self.scale, kind, self.cfg.bot_names)
+                    # Commands require UIA evidence, not a trigger or screenshot.
+                    verified = uia_row_direction(row) == "incoming"
+                    sender = group_sender_name(row) if kind == "group" else session.name
                 except Exception:
-                    direction = "unknown"
+                    direction, verified, sender = "unknown", False, ""
                 self.require_foreground()
-                if direction == "unknown":
-                    triggered = (kind == "group"
-                                 and self.cfg.group_mode in ("prefix", "mention")
-                                 and self.policy.prompt(candidate) is not None)
-                    if triggered:
-                        direction = "incoming"
-                        log.info(
-                            "sender_unknown accepted_by_group_trigger=1 mode=%s",
-                            self.cfg.group_mode)
-                    else:
-                        if kind != "group" or self.cfg.group_mode == "all":
-                            log.warning("sender_unknown skipped=1 kind=%s", kind)
-                        continue
                 if direction != "incoming":
+                    if direction == "unknown":
+                        log.warning("identity_skipped reason=direction_unknown kind=%s", kind)
                     continue
+                candidate = Message(
+                    uuid.uuid4().hex, session.name, kind, text, source_key=source_key,
+                    sender_name=sender, direction=direction, direction_verified=verified)
                 messages.append(candidate)
         return messages
 
@@ -599,16 +596,21 @@ class WeChatDesktop:
         if self.current() != (message.chat, message.kind) or edit.window_text() != "":
             raise FocusLost("输入前界面状态变化")
         # From here on, any failure is ambiguous and the process must terminate.
-        edit.set_text(answer)
-        if (not self.is_foreground() or self.current() != (message.chat, message.kind)
-                or edit.window_text() != answer):
-            raise SendUncertain("填入回答后状态不明；请检查草稿，不自动重发")
-        import pyautogui
-        pyautogui.hotkey("alt", "s")
-        time.sleep(.3)
-        if (not self.is_foreground() or self.current() != (message.chat, message.kind)
-                or edit.window_text() != ""):
-            raise SendUncertain("发送结果不明；请人工检查，不自动重发")
+        try:
+            edit.set_text(answer)
+            if (not self.is_foreground() or self.current() != (message.chat, message.kind)
+                    or edit.window_text() != answer):
+                raise SendUncertain("填入回答后状态不明；请检查草稿，不自动重发")
+            import pyautogui
+            pyautogui.hotkey("alt", "s")
+            time.sleep(.3)
+            if (not self.is_foreground() or self.current() != (message.chat, message.kind)
+                    or edit.window_text() != ""):
+                raise SendUncertain("发送结果不明；请人工检查，不自动重发")
+        except SendUncertain:
+            raise
+        except Exception as exc:
+            raise SendUncertain("输入或发送阶段异常；结果不明，不自动重发") from exc
 
 
 class ChatLLM:
@@ -659,16 +661,108 @@ class InstanceLock:
 
 
 class Bot:
-    def __init__(self, root: Path, cfg: Config, settings: LLMSettings):
+    def __init__(self, root: Path, cfg: Config, settings: LLMSettings, *,
+                 desktop=None, llm=None, storage=None):
         self.root, self.cfg = root, cfg
-        self.desktop = WeChatDesktop(cfg)
-        self.llm = ChatLLM(settings, cfg)
+        self.storage = storage if storage is not None else Storage(root)
+        self.storage.register_targets(cfg.private_chats, cfg.groups)
+        self.permissions = Permissions(self.storage)
+        self.permissions.register_private_targets(cfg.private_chats)
+        self.commands = Commands(self.permissions)
         self.policy = Policy(cfg)
-        self.storage = Storage(root)
+        self.desktop = desktop if desktop is not None else WeChatDesktop(cfg)
+        self.llm = llm if llm is not None else ChatLLM(settings, cfg)
         recovered = self.storage.recover_incomplete()
         if recovered:
             log.warning("recovered_incomplete=%s marked=failed", recovered)
-        self.storage.register_targets(cfg.private_chats, cfg.groups)
+
+    def process_message(self, message: Message) -> bool:
+        """Authorize before any model/media work. False means pause/rebaseline.
+
+        Exposed for fake-adapter tests; this method never creates another UI thread.
+        A decision is re-read before sending so blocking during a model call takes
+        effect without restarting the bot. Commands never enter model history.
+        """
+        if self.stopped() or self.policy.expected_kind(message.chat) != message.kind:
+            return True
+        decision = self.permissions.resolve_incoming(
+            message.kind, message.chat, message.sender_name, message.direction)
+        if not decision.allowed:
+            log.info("access_skipped event=%s reason=%s kind=%s",
+                     message.id[:8], decision.reason, message.kind)
+            return True
+        if len(message.text) > self.cfg.max_input_chars:
+            return True
+        command = parse_command(message.text, self.cfg.bot_names)
+        if command is not None:
+            if not message.direction_verified:
+                self.permissions.audit_command(decision, command.name, "direction_unverified")
+                return True
+            if not self.desktop.is_foreground():
+                raise FocusLost("命令执行前微信失去焦点")
+            answer = self.commands.execute(command, decision, message.kind)
+            if answer is None:
+                return True
+            if self.stopped() or not self.desktop.is_foreground():
+                self.permissions.audit_command(decision, command.name, "reply_cancelled")
+                return False
+            current = self.permissions.resolve(decision.principal_id, decision.chat_id)
+            if (not current.allowed or (message.kind == "group" and command.name == "status"
+                                        and current.access_level != "admin")):
+                self.permissions.audit_command(decision, command.name, "reply_revoked")
+                return True
+            try:
+                self.desktop.send(message, answer[:self.cfg.max_reply_chars])
+            except SendUncertain:
+                self.permissions.audit_command(decision, command.name, "reply_unknown")
+                raise
+            except Exception:
+                self.permissions.audit_command(decision, command.name, "reply_failed")
+                raise
+            self.permissions.audit_command(decision, command.name, "reply_sent")
+            return True
+        question = self.policy.prompt(message)
+        if question is None:
+            return True
+        incoming_id = self.storage.add_incoming(
+            message.kind, message.chat, question, source_key=message.source_key)
+        log.info("llm_start event=%s kind=%s", message.id[:8], message.kind)
+        try:
+            history = self.storage.history(message.kind, message.chat, self.cfg.context_turns)
+            answer = self.llm.reply(question, history)
+        except Exception as exc:
+            self.storage.mark_message(incoming_id, "failed", f"llm:{type(exc).__name__}")
+            log.exception("llm_failed event=%s", message.id[:8])
+            return True
+        # Never send a generated reply after permission was revoked in the panel.
+        current = self.permissions.resolve(decision.principal_id, decision.chat_id)
+        if not current.allowed:
+            self.storage.mark_message(incoming_id, "failed", "access_revoked_before_send")
+            return True
+        if self.stopped() or not self.desktop.is_foreground():
+            self.storage.mark_message(incoming_id, "failed", "stopped_or_focus_lost_before_send")
+            log.info("discarded event=%s reason=stopped_or_focus_lost", message.id[:8])
+            return False
+        try:
+            self.desktop.send(message, answer)
+        except SendUncertain as exc:
+            self.storage.mark_message(incoming_id, "unknown", "send_result_unknown")
+            self.storage.add_assistant(message.kind, message.chat, answer, status="unknown",
+                                       error_message=type(exc).__name__)
+            raise
+        except FocusLost as exc:
+            self.storage.mark_message(incoming_id, "failed", "focus_lost_during_send")
+            self.storage.add_assistant(message.kind, message.chat, answer, status="failed",
+                                       error_message=type(exc).__name__)
+            raise
+        except Exception as exc:
+            self.storage.mark_message(incoming_id, "failed", "send_failed")
+            self.storage.add_assistant(message.kind, message.chat, answer, status="failed",
+                                       error_message=type(exc).__name__)
+            raise
+        self.storage.complete_turn(incoming_id, message.kind, message.chat, answer)
+        log.info("submitted event=%s response_chars=%s", message.id[:8], len(answer))
+        return True
 
     def stopped(self):
         return (self.root / "STOP").exists()
@@ -700,54 +794,10 @@ class Bot:
                 for message in messages:
                     if self.stopped():
                         break
-                    question = self.policy.prompt(message)
-                    if question is None:
-                        continue
-                    incoming_id = self.storage.add_incoming(
-                        message.kind, message.chat, question, source_key=message.source_key)
-                    log.info("llm_start event=%s kind=%s", message.id[:8], message.kind)
-                    try:
-                        history = self.storage.history(
-                            message.kind, message.chat, self.cfg.context_turns)
-                        answer = self.llm.reply(question, history)
-                    except Exception as exc:
-                        self.storage.mark_message(
-                            incoming_id, "failed", f"llm:{type(exc).__name__}")
-                        log.exception("llm_failed event=%s", message.id[:8])
-                        continue
-                    if self.stopped() or not self.desktop.is_foreground():
-                        self.storage.mark_message(
-                            incoming_id, "failed", "stopped_or_focus_lost_before_send")
-                        log.info("discarded event=%s reason=stopped_or_focus_lost", message.id[:8])
+                    if not self.process_message(message):
                         ready = False
                         focused_since = None
                         break
-                    try:
-                        self.desktop.send(message, answer)
-                    except SendUncertain as exc:
-                        self.storage.mark_message(
-                            incoming_id, "unknown", "send_result_unknown")
-                        self.storage.add_assistant(
-                            message.kind, message.chat, answer, status="unknown",
-                            error_message=type(exc).__name__)
-                        raise
-                    except FocusLost as exc:
-                        self.storage.mark_message(
-                            incoming_id, "failed", "focus_lost_during_send")
-                        self.storage.add_assistant(
-                            message.kind, message.chat, answer, status="failed",
-                            error_message=type(exc).__name__)
-                        raise
-                    except Exception as exc:
-                        self.storage.mark_message(
-                            incoming_id, "failed", "send_failed")
-                        self.storage.add_assistant(
-                            message.kind, message.chat, answer, status="failed",
-                            error_message=type(exc).__name__)
-                        raise
-                    self.storage.complete_turn(
-                        incoming_id, message.kind, message.chat, answer)
-                    log.info("submitted event=%s response_chars=%s", message.id[:8], len(answer))
             except FocusLost:
                 ready = False
                 focused_since = None
@@ -791,7 +841,7 @@ def main(argv=None) -> int:
         print("配置检查通过；未连接微信，未调用模型，未发送消息。")
         return 0
     if (ROOT / "STOP").exists():
-        raise ValueError("存在 STOP 文件；请删除 STOP，或运行 start.bat")
+        raise ValueError("存在 STOP 文件；请通过 panel.bat 打开控制台后启动")
     lock = InstanceLock(ROOT / "data" / "bot.lock")
     pid_path = ROOT / "data" / "bot.pid"
     bot = None

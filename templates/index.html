@@ -2,6 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
+  <meta name="csrf-token" content="{{ csrf_token }}">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>WeChat AI 控制台</title>
   <style>
@@ -181,6 +182,36 @@
       <select id="storageChat"><option value="">暂无会话</option></select>
     </section>
     <section class="card">
+      <h2>身份与权限（第 3 步）</h2>
+      <div class="hint">当前仅本机临时 owner，第 8 步接入账号登录。微信身份不能成为 owner。权限修改下一条新消息生效；已在发送的消息无法撤回。</div>
+      <div class="hint">群新昵称先待确认，不调用模型。昵称不是稳定微信 ID；遇到重名或改名，请先停用并人工核对，不要盲目授权。</div>
+      <label for="principalSearch">搜索昵称或所在聊天（最多显示 200 个）</label>
+      <input type="text" id="principalSearch" maxlength="256" placeholder="输入关键词后点击刷新">
+      <div class="actions" style="margin-top:10px"><button onclick="refreshPrincipals()">刷新身份</button></div>
+      <label for="principalSelect">选择身份</label>
+      <select id="principalSelect" onchange="renderPrincipal()"><option value="">暂无已发现身份</option></select>
+      <pre id="principalDetails" style="margin-top:10px">尚未选择</pre>
+      <div class="actions" style="margin-top:10px">
+        <button class="primary" onclick="setPrincipalStatus('active')">核对并批准</button>
+        <button onclick="setPrincipalStatus('disabled')">停用身份</button>
+      </div>
+      <div class="row">
+        <div><label for="grantScope">权限范围</label><select id="grantScope"><option value="chat">当前聊天</option><option value="global">全局（仍为同一身份，不跨群合并）</option></select></div>
+        <div><label for="grantLevel">权限等级</label><select id="grantLevel"><option value="user">user 普通用户</option><option value="admin">admin 管理员</option><option value="blocked">blocked 静默拉黑</option></select></div>
+      </div>
+      <div class="actions" style="margin-top:10px">
+        <button onclick="changeGrant('set')">保存权限</button>
+        <button onclick="changeGrant('revoke')">移除本范围权限</button>
+      </div>
+      <div class="hint">全局或当前聊天的 blocked 都优先于 admin/user。解封时需移除对应 blocked，不能只在另一范围设为 user。群内 /ai status 仅已批准 admin 可用；群共享历史暂不允许通过 /ai reset 删除。</div>
+    </section>
+    <section class="card">
+      <h2>安全审计</h2>
+      <div class="actions"><button onclick="refreshAudit()">刷新最近 100 条</button></div>
+      <pre id="auditEvents" style="margin-top:10px">尚未读取</pre>
+      <div class="hint">只记录操作、身份 ID、权限变化和结果，不记录密钥或命令正文。此区域不自动滚动刷新。</div>
+    </section>
+    <section class="card">
       <h2>日志</h2>
       <details open>
         <summary>机器人运行日志</summary>
@@ -231,7 +262,7 @@
 
     async function api(path, options) {
       const res = await fetch(path, Object.assign({
-        headers: {"Content-Type": "application/json"}
+        headers: {"Content-Type": "application/json", "X-CSRF-Token": document.querySelector('meta[name="csrf-token"]').content}
       }, options));
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data.ok === false) throw new Error(data.error || ("HTTP " + res.status));
@@ -283,14 +314,14 @@
         return;
       }
       $("storageSummary").textContent =
-        "已启用 SQLite · 会话 " + storage.chat_count + " · 消息 " + storage.message_count +
+        "已启用 SQLite v" + storage.schema_version + " · 会话 " + storage.chat_count + " · 消息 " + storage.message_count +
         " · 失败 " + storage.failed_count + " · 状态不明 " + storage.unknown_count +
         " · 文件 " + formatBytes(storage.size_bytes);
       try {
         const data = await api("/api/storage/chats");
         const select = $("storageChat");
         const current = select.value;
-        select.innerHTML = "";
+        select.replaceChildren();
         if (!data.chats.length) {
           select.add(new Option("暂无会话", ""));
           return;
@@ -330,7 +361,7 @@
       if (!confirm("确定清空所有好友和群聊的全部上下文吗？此操作不可恢复。")) return;
       try {
         const data = await api("/api/storage/clear-all", {
-          method: "POST", body: "{}"
+          method: "POST", body: JSON.stringify({confirm:"clear-all"})
         });
         toast(data.message || "已清空", true);
         await refresh(true);
@@ -384,6 +415,69 @@
 
     refresh(true).catch(err => toast(err.message, false));
     setInterval(() => { if (loaded) refresh(false).catch(() => {}); }, 2000);
+
+    let principalRows = [];
+    function selectedPrincipal() {
+      return principalRows.find(p => String(p.id) === $("principalSelect").value);
+    }
+    function renderPrincipal() {
+      const p = selectedPrincipal();
+      $("principalDetails").textContent = p ? JSON.stringify({
+        id:p.id, nickname:p.display_name, chat:p.chat_name, kind:p.kind, status:p.status,
+        effective_permission:p.access_level, allowed:p.allowed, reason:p.reason, grants:p.grants
+      }, null, 2) : "尚未选择";
+    }
+    async function refreshPrincipals() {
+      try {
+        const previous = $("principalSelect").value;
+        const data = await api("/api/v1/principals?q=" + encodeURIComponent($("principalSearch").value));
+        principalRows = data.principals || [];
+        const select = $("principalSelect");
+        select.replaceChildren();
+        for (const p of principalRows) {
+          const option = document.createElement("option");
+          option.value = String(p.id);
+          option.textContent = "[" + p.status + " / " + p.access_level + "] " + p.display_name + " · " + (p.chat_name || p.kind);
+          select.appendChild(option);
+        }
+        if (!principalRows.length) {
+          const option = document.createElement("option"); option.value=""; option.textContent="暂无已发现身份"; select.appendChild(option);
+        } else if (principalRows.some(p => String(p.id) === previous)) select.value=previous;
+        renderPrincipal();
+      } catch (e) { toast(e.message, false); }
+    }
+    async function setPrincipalStatus(status) {
+      const p = selectedPrincipal();
+      if (!p) return toast("请先选择身份", false);
+      const message = status === "active"
+        ? "已人工核对这个身份，且所在群中没有重名、改名或冒名风险？批准后只处理下一条新消息。"
+        : "确认停用此身份？它将不调用模型且不执行命令。";
+      if (!confirm(message)) return;
+      try {
+        const data = await api("/api/v1/principals/"+p.id+"/status", {method:"POST",body:JSON.stringify({status,confirm_identity:true})});
+        toast(data.message,true); await refreshPrincipals(); await refreshAudit();
+      } catch (e) { toast(e.message,false); }
+    }
+    async function changeGrant(operation) {
+      const p = selectedPrincipal();
+      if (!p) return toast("请先选择身份",false);
+      if (!confirm("确认修改该身份在所选范围的权限？")) return;
+      try {
+        const data = await api("/api/v1/permissions", {method:"POST",body:JSON.stringify({
+          principal_id:p.id, chat_id:p.chat_id, scope:$("grantScope").value,
+          access_level:$("grantLevel").value, operation
+        })});
+        toast(data.message,true); await refreshPrincipals(); await refreshAudit();
+      } catch(e) { toast(e.message,false); }
+    }
+    async function refreshAudit() {
+      try {
+        const data = await api("/api/v1/audit");
+        $("auditEvents").textContent = (data.events || []).map(e => e.id+" "+e.created_at+" "+e.source+" "+e.action+" actor="+e.actor_principal_id+" target="+e.target_type+":"+e.target_id+" "+JSON.stringify(e.details)).join("\n") || "暂无审计事件";
+      } catch(e) { toast(e.message,false); }
+    }
+    refreshPrincipals();
+    refreshAudit();
   </script>
 </body>
 </html>

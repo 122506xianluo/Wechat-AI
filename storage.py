@@ -1,6 +1,5 @@
-from __future__ import annotations
-
 """SQLite persistence for chat metadata, messages, and bounded LLM history."""
+from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -10,7 +9,8 @@ from typing import Iterator
 import uuid
 
 
-SCHEMA_VERSION = 1
+from audit import record_audit
+from migrations import SCHEMA_VERSION, migrate
 
 
 def utc_now() -> str:
@@ -43,54 +43,19 @@ class Storage:
             connection.close()
 
     def _initialize(self) -> None:
+        migrate(self.path)
+
+    @contextmanager
+    def transaction(self) -> Iterator[sqlite3.Connection]:
+        """Short atomic write, including audit; no UI or network inside it."""
         with self._connection() as connection:
-            connection.execute("PRAGMA journal_mode = WAL")
-            connection.execute("""
-                CREATE TABLE IF NOT EXISTS schema_meta (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL
-                )
-            """)
-            version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version > SCHEMA_VERSION:
-                raise RuntimeError(
-                    f"数据库版本 {version} 高于当前程序支持的版本 {SCHEMA_VERSION}")
-            if version < 1:
-                connection.executescript("""
-                    CREATE TABLE IF NOT EXISTS chats (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        kind TEXT NOT NULL CHECK(kind IN ('private', 'group')),
-                        name TEXT NOT NULL,
-                        enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
-                        created_at TEXT NOT NULL,
-                        updated_at TEXT NOT NULL,
-                        UNIQUE(kind, name)
-                    );
-
-                    CREATE TABLE IF NOT EXISTS messages (
-                        id TEXT PRIMARY KEY,
-                        chat_id INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
-                        role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
-                        direction TEXT NOT NULL CHECK(direction IN ('incoming', 'outgoing')),
-                        content TEXT NOT NULL,
-                        status TEXT NOT NULL CHECK(status IN ('pending', 'received', 'sent', 'failed', 'unknown')),
-                        source_key TEXT,
-                        created_at TEXT NOT NULL,
-                        updated_at TEXT NOT NULL,
-                        error_message TEXT
-                    );
-
-                    CREATE INDEX IF NOT EXISTS idx_messages_chat_created
-                        ON messages(chat_id, created_at, id);
-                    CREATE INDEX IF NOT EXISTS idx_messages_chat_role_status
-                        ON messages(chat_id, role, status);
-                    PRAGMA user_version = 1;
-                """)
-            connection.execute(
-                "INSERT INTO schema_meta(key, value) VALUES('schema_version', ?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (str(SCHEMA_VERSION),))
-            connection.commit()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                yield connection
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
 
     def ensure_chat(self, kind: str, name: str) -> int:
         if kind not in ("private", "group") or not name:
@@ -171,18 +136,20 @@ class Storage:
         """Commit an incoming turn and its verified outgoing answer together."""
         assistant_id = uuid.uuid4().hex
         now = utc_now()
-        chat_id = self.ensure_chat(kind, name)
-        with self._connection() as connection:
-            connection.execute(
-                "UPDATE messages SET status='received', updated_at=? WHERE id=? AND status='pending'",
-                (now, incoming_id))
+        chat_id = self.chat_id(kind, name)
+        with self.transaction() as connection:
+            cursor = connection.execute(
+                "UPDATE messages SET status='received', updated_at=? "
+                "WHERE id=? AND chat_id=? AND status='pending' AND role='user' AND direction='incoming'",
+                (now, incoming_id, chat_id))
+            if cursor.rowcount != 1:
+                raise ValueError("入站记录不存在、已结束或不属于当前会话")
             connection.execute(
                 """INSERT INTO messages
                 (id, chat_id, role, direction, content, status, source_key,
                  created_at, updated_at, error_message)
                 VALUES (?, ?, 'assistant', 'outgoing', ?, 'sent', NULL, ?, ?, NULL)""",
                 (assistant_id, chat_id, content, now, now))
-            connection.commit()
         return assistant_id
 
     def recover_incomplete(self) -> int:
@@ -237,27 +204,33 @@ class Storage:
     def list_chats(self) -> list[dict]:
         with self._connection() as connection:
             rows = connection.execute(
-                """SELECT c.kind, c.name, c.updated_at,
+                """SELECT c.id, c.kind, c.name, c.enabled, c.updated_at,
                           COUNT(m.id) AS message_count
                    FROM chats c LEFT JOIN messages m ON m.chat_id=c.id
                    GROUP BY c.id ORDER BY c.kind, c.name"""
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def clear_chat(self, kind: str, name: str) -> int:
-        with self._connection() as connection:
-            cursor = connection.execute(
-                """DELETE FROM messages WHERE chat_id IN
-                   (SELECT id FROM chats WHERE kind=? AND name=?)""",
-                (kind, name))
-            connection.commit()
-            return cursor.rowcount
+    def clear_chat(self, kind: str, name: str, *, actor_id: int | None = None,
+                   source: str = "system") -> int:
+        with self.transaction() as connection:
+            row = connection.execute(
+                "SELECT id FROM chats WHERE kind=? AND name=?", (kind, name)).fetchone()
+            if row is None:
+                raise ValueError("会话不存在")
+            cursor = connection.execute("DELETE FROM messages WHERE chat_id=?", (row[0],))
+            deleted = cursor.rowcount
+            record_audit(connection, "context.clear", source=source, actor_id=actor_id,
+                         target_type="chat", target_id=row[0], details={"deleted": deleted})
+            return deleted
 
-    def clear_all_history(self) -> int:
-        with self._connection() as connection:
+    def clear_all_history(self, *, actor_id: int | None = None, source: str = "system") -> int:
+        with self.transaction() as connection:
             cursor = connection.execute("DELETE FROM messages")
-            connection.commit()
-            return cursor.rowcount
+            deleted = cursor.rowcount
+            record_audit(connection, "context.clear_all", source=source, actor_id=actor_id,
+                         details={"deleted": deleted})
+            return deleted
 
     def close(self) -> None:
         """Compatibility hook; operations intentionally use short-lived connections."""
