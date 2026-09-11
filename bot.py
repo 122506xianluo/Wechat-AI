@@ -6,7 +6,6 @@ inside the guest. The host computer may continue to be used independently.
 from __future__ import annotations
 
 import argparse
-from collections import Counter
 from dataclasses import dataclass, field, fields
 from hashlib import sha256
 import json
@@ -203,27 +202,205 @@ def row_token(class_name: str, text: str) -> str:
     return sha256((class_name + "\0" + text).encode()).hexdigest()
 
 
-def bubble_direction(image, scale: float = 1.0) -> str:
-    """Conservative avatar-edge heuristic; ambiguous messages are skipped."""
+def _control_type_name(ctrl) -> str:
+    for getter in (
+        lambda: getattr(getattr(ctrl, "element_info", None), "control_type", ""),
+        lambda: ctrl.friendly_class_name(),
+        lambda: getattr(ctrl, "control_type", ""),
+    ):
+        try:
+            value = getter()
+        except Exception:
+            continue
+        if value:
+            return str(value)
+    return ""
+
+
+def _control_rect(ctrl):
+    try:
+        rect = ctrl.rectangle()
+        return rect.left, rect.top, rect.right, rect.bottom
+    except Exception:
+        return None
+
+
+def _walk_children(ctrl, depth: int = 0, max_depth: int = 3):
+    if depth > max_depth:
+        return
+    try:
+        kids = ctrl.children()
+    except Exception:
+        return
+    for kid in kids:
+        yield kid
+        yield from _walk_children(kid, depth + 1, max_depth)
+
+
+def _normalized_wechat_name(value: str) -> str:
+    return re.sub(r"[\s\u2005]+", "", value or "")
+
+
+def group_sender_name(row) -> str:
+    """Read the group sender from WeChat's avatar Button without mouse input."""
+    candidates = []
+    try:
+        children = row.children()
+        if children:
+            candidates.extend(children[0].children(control_type="Button"))
+    except Exception:
+        pass
+    if not candidates:
+        for ctrl in _walk_children(row, max_depth=5):
+            if "button" in _control_type_name(ctrl).lower():
+                candidates.append(ctrl)
+    for ctrl in candidates:
+        try:
+            name = (ctrl.window_text() or "").strip()
+        except Exception:
+            continue
+        if name:
+            return name
+    return ""
+
+
+def uia_row_direction(row) -> str:
+    """Prefer WeChat UIA avatar/nickname position over screenshots."""
+    box = _control_rect(row)
+    if box is None:
+        return "unknown"
+    left, top, right, bottom = box
+    width, height = right - left, bottom - top
+    if width < 40 or height < 10:
+        return "unknown"
+    left_hits = right_hits = 0
+    left_named = right_named = False
+    edge = max(36, min(90, int(width * 0.22)))
+    max_w, max_h = width * 0.42, height * 0.95
+    for ctrl in _walk_children(row):
+        ctype = _control_type_name(ctrl).lower()
+        if ctype and not any(token in ctype for token in ("button", "image", "text")):
+            continue
+        rect = _control_rect(ctrl)
+        if rect is None:
+            continue
+        l, t, r, b = rect
+        cw, ch = r - l, b - t
+        if cw <= 8 or ch <= 8 or cw > max_w or ch > max_h:
+            continue
+        try:
+            name = (ctrl.window_text() or "").strip()
+        except Exception:
+            name = ""
+        near_left = (l - left) <= edge
+        near_right = (right - r) <= edge
+        if near_left and not near_right:
+            left_hits += 1
+            if name:
+                left_named = True
+        elif near_right and not near_left:
+            right_hits += 1
+            if name:
+                right_named = True
+    if left_named and not right_named:
+        return "incoming"
+    if right_named and not left_named:
+        return "outgoing"
+    if left_hits and not right_hits:
+        return "incoming"
+    if right_hits and not left_hits:
+        return "outgoing"
+    return "unknown"
+
+
+def _band_score(image, box) -> float:
+    crop = image.crop(box)
+    pixels = list(getattr(crop, "get_flattened_data", crop.getdata)())
+    count = len(pixels)
+    if count == 0:
+        return 0.0
+    if count > 5000:
+        pixels = pixels[::count // 5000]
+        count = len(pixels)
+    unique = len(set(pixels))
+    avg_r = sum(p[0] for p in pixels) / count
+    avg_g = sum(p[1] for p in pixels) / count
+    avg_b = sum(p[2] for p in pixels) / count
+    variance = sum(
+        (p[0] - avg_r) ** 2 + (p[1] - avg_g) ** 2 + (p[2] - avg_b) ** 2
+        for p in pixels) / count
+    return variance * (1.0 + unique)
+
+
+def _first_varied_offset(image, from_right: bool, scale: float) -> int:
+    width, height = image.size
+    limit = min(width // 2, max(24, round(110 * scale)))
+    step_y = max(1, height // 24)
+    xs = range(width - 1, width - 1 - limit, -1) if from_right else range(limit)
+    first = None
+    for index, x in enumerate(xs):
+        column = [image.getpixel((x, y)) for y in range(0, height, step_y)]
+        if first is None:
+            first = column
+            continue
+        if len(set(column)) >= 3:
+            return index
+        mid = column[len(column) // 2]
+        origin = first[len(first) // 2]
+        if sum((a - b) ** 2 for a, b in zip(mid, origin)) > 35 ** 2:
+            return index
+    return limit
+
+
+def bubble_direction(image, scale: float = 1.0, kind: str = "private") -> str:
+    """Compare left/right avatar bands without assuming the chat background is dominant."""
     image = image.convert("RGB")
     width, height = image.size
-    edge = round(55 * scale)
-    if width < edge * 4 or height < 20 * scale:
+    edge = max(16, round(52 * scale))
+    if width < edge * 3 or height < 16:
         return "unknown"
-    pixels = lambda img: getattr(img, "get_flattened_data", img.getdata)()
-    background = Counter(pixels(image)).most_common(1)[0][0]
-
-    def activity(box):
-        return sum(sum((a - b) ** 2 for a, b in zip(pixel, background)) > 55 ** 2
-                   for pixel in pixels(image.crop(box)))
-
-    left = activity((0, 0, edge, height))
-    right = activity((width - edge, 0, width, height))
-    threshold = 120 * scale * scale
-    if left > threshold and right < threshold / 2:
+    left = _band_score(image, (0, 0, min(edge, width // 3), height))
+    right = _band_score(image, (max(0, width - edge), 0, width, height))
+    left_off = _first_varied_offset(image, False, scale)
+    right_off = _first_varied_offset(image, True, scale)
+    incoming_votes = outgoing_votes = 0
+    if left > right * 1.25:
+        incoming_votes += 1
+    elif right > left * 1.25:
+        outgoing_votes += 1
+    if left_off + 6 < right_off:
+        incoming_votes += 1
+    elif right_off + 6 < left_off:
+        outgoing_votes += 1
+    if incoming_votes > outgoing_votes:
         return "incoming"
-    if right > threshold and left < threshold / 2:
+    if outgoing_votes > incoming_votes:
         return "outgoing"
+    if kind == "group" and outgoing_votes == 0 and left >= right:
+        return "incoming"
+    return "unknown"
+
+
+def row_direction(row, scale: float = 1.0, kind: str = "private",
+                  bot_names: tuple[str, ...] | list[str] = ()) -> str:
+    """Sender name first for groups, then UIA position and screenshot fallbacks."""
+    if kind == "group":
+        sender = group_sender_name(row)
+        if sender:
+            normalized = _normalized_wechat_name(sender)
+            mine = {_normalized_wechat_name(name) for name in bot_names}
+            return "outgoing" if normalized in mine else "incoming"
+    direction = uia_row_direction(row)
+    if direction in ("incoming", "outgoing"):
+        return direction
+    try:
+        image = row.capture_as_image()
+    except Exception:
+        image = None
+    if image is not None:
+        direction = bubble_direction(image, scale, kind)
+        if direction in ("incoming", "outgoing"):
+            return direction
     return "unknown"
 
 
@@ -377,14 +554,33 @@ class WeChatDesktop:
                 if row.class_name() != "mmui::ChatTextItemView":
                     continue
                 self.require_foreground()
-                direction = bubble_direction(row.capture_as_image(), self.scale)
+                text = row.window_text()
+                source_key = row_token(row.class_name(), text)
+                candidate = Message(
+                    uuid.uuid4().hex, session.name, kind, text,
+                    source_key=source_key)
+                try:
+                    direction = row_direction(
+                        row, self.scale, kind, self.cfg.bot_names)
+                except Exception:
+                    direction = "unknown"
                 self.require_foreground()
                 if direction == "unknown":
-                    log.warning("sender_unknown skipped=1 kind=%s", kind)
-                    continue
+                    triggered = (kind == "group"
+                                 and self.cfg.group_mode in ("prefix", "mention")
+                                 and self.policy.prompt(candidate) is not None)
+                    if triggered:
+                        direction = "incoming"
+                        log.info(
+                            "sender_unknown accepted_by_group_trigger=1 mode=%s",
+                            self.cfg.group_mode)
+                    else:
+                        if kind != "group" or self.cfg.group_mode == "all":
+                            log.warning("sender_unknown skipped=1 kind=%s", kind)
+                        continue
                 if direction != "incoming":
                     continue
-                messages.append(Message(uuid.uuid4().hex, session.name, kind, row.window_text(), source_key=row_token(row.class_name(), row.window_text())))
+                messages.append(candidate)
         return messages
 
     def send(self, message: Message, answer: str):
