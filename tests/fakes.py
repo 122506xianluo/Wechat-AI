@@ -8,7 +8,7 @@ class FakeLLM:
         self.answer, self.effect, self.calls = answer, effect, []
         self.closed = False
 
-    def reply(self, question, history):
+    def reply(self, question, history, **kwargs):
         self.calls.append((question, list(history)))
         if self.effect:
             self.effect()

@@ -21,6 +21,7 @@ import uuid
 from commands import Commands, parse_command
 from permissions import Permissions
 from storage import Storage
+from roles import Roles
 
 import httpx
 from dotenv import load_dotenv
@@ -622,12 +623,14 @@ class ChatLLM:
     def close(self):
         self.client.close()
 
-    def reply(self, question: str, history: list[dict]) -> str:
+    def reply(self, question: str, history: list[dict], *, role=None) -> str:
+        role = role or {}
         payload = {
-            "model": self.settings.model,
-            "messages": ([{"role": "system", "content": self.cfg.system_prompt}]
+            "model": role.get("model") or self.settings.model,
+            "messages": ([{"role": "system", "content": role.get("system_prompt", self.cfg.system_prompt)}]
                          + history + [{"role": "user", "content": question}]),
-            "max_tokens": self.cfg.max_tokens,
+            "max_tokens": role.get("max_tokens", self.cfg.max_tokens),
+            "temperature": role.get("temperature", 0.7),
         }
         headers = {"Content-Type": "application/json"}
         if self.settings.api_key:
@@ -641,7 +644,7 @@ class ChatLLM:
             raise BotError(f"LLM 请求失败：{type(exc).__name__}") from exc
         if not answer:
             raise BotError("模型返回空回答")
-        return answer[:self.cfg.max_reply_chars]
+        return answer[:role.get("max_reply_chars", self.cfg.max_reply_chars)]
 
 
 class InstanceLock:
@@ -669,6 +672,7 @@ class Bot:
         self.permissions = Permissions(self.storage)
         self.permissions.register_private_targets(cfg.private_chats)
         self.commands = Commands(self.permissions)
+        self.roles = Roles(self.storage)
         self.policy = Policy(cfg)
         self.desktop = desktop if desktop is not None else WeChatDesktop(cfg)
         self.llm = llm if llm is not None else ChatLLM(settings, cfg)
@@ -729,7 +733,7 @@ class Bot:
         log.info("llm_start event=%s kind=%s", message.id[:8], message.kind)
         try:
             history = self.storage.history(message.kind, message.chat, self.cfg.context_turns)
-            answer = self.llm.reply(question, history)
+            answer = self.llm.reply(question, history, role=self.roles.resolve(decision.chat_id, decision.principal_id))
         except Exception as exc:
             self.storage.mark_message(incoming_id, "failed", f"llm:{type(exc).__name__}")
             log.exception("llm_failed event=%s", message.id[:8])

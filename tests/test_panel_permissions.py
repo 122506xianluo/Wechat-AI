@@ -1,4 +1,5 @@
 from __future__ import annotations
+from migrations import SCHEMA_VERSION
 
 import json
 from pathlib import Path
@@ -116,7 +117,7 @@ def test_clear_context_audit_confirm_and_running_guard(client, permissions, monk
     assert post(client, "/api/storage/clear-chat", {"kind": "private", "name": "Test Friend"}).status_code == 400
     monkeypatch.setattr(panel, "bot_running", lambda: False)
     assert post(client, "/api/storage/clear-all", {}).status_code == 400
-    assert storage.stats()["message_count"] == 2
+    assert storage.stats()["message_count"] == SCHEMA_VERSION
     assert post(client, "/api/storage/clear-chat", {"kind": "private", "name": "Test Friend"}).status_code == 200
     assert get(client, "/api/v1/audit").json["events"][0]["action"] == "context.clear"
     assert post(client, "/api/storage/clear-all", {"confirm": "clear-all"}).status_code == 200

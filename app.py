@@ -22,6 +22,7 @@ from flask import Flask, g, jsonify, render_template, request
 from bot import Config, LLMSettings
 from permissions import LOCAL_OWNER, PermissionDenied, Permissions
 from storage import Storage
+from admin_api import register_admin
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
@@ -610,6 +611,9 @@ def dump_error(exc=None):
         print(text_err)
     except Exception:
         pass
+
+
+register_admin(app, get_storage, management_error)
 
 
 def main() -> int:

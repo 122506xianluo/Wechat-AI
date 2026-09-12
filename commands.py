@@ -5,14 +5,16 @@ from dataclasses import dataclass
 import re
 
 from permissions import AccessDecision, Permissions
+from roles import Roles
 
-HELP = "可用命令：/ai help、/ai status、/ai reset。群内 status 仅管理员可用；群成员独立清空将在步骤 7 开放。"
+HELP = "可用命令：/ai help、/ai status、/ai reset、/ai role、/ai role list、/ai role use <角色名>。群内 status 仅管理员可用；群成员独立清空将在步骤 7 开放。"
 
 
 @dataclass(frozen=True)
 class Command:
     name: str
     valid: bool = True
+    argument: str = ""
 
 
 def parse_command(text: str, bot_names: list[str] | None = None) -> Command | None:
@@ -23,6 +25,12 @@ def parse_command(text: str, bot_names: list[str] | None = None) -> Command | No
         return Command("help")
     # Reserve only known subcommands. '/ai 普通提问' remains a normal prefix
     # trigger; extra arguments or multiline command text never perform a reset.
+    if text == "/ai role":
+        return Command("role")
+    if text == "/ai role list":
+        return Command("role_list")
+    if text.startswith("/ai role use "):
+        return Command("role_use", "\n" not in text, text[len("/ai role use "):].strip())
     parts = text.split()
     if len(parts) >= 2 and parts[0] == "/ai" and parts[1] in ("help", "status", "reset"):
         return Command(parts[1], len(parts) == 2 and "\n" not in text and "\r" not in text)
@@ -32,6 +40,7 @@ def parse_command(text: str, bot_names: list[str] | None = None) -> Command | No
 class Commands:
     def __init__(self, permissions: Permissions):
         self.permissions = permissions
+        self.roles = Roles(permissions.storage)
 
     def execute(self, command: Command, decision: AccessDecision, kind: str) -> str | None:
         if not decision.allowed or decision.principal_id is None:
@@ -49,6 +58,20 @@ class Commands:
                 self.permissions.audit_command(current, command.name, "denied")
                 return None
             answer = f"当前权限：{current.access_level}；本会话已启用；上下文来源：SQLite。"
+        elif command.name == "role":
+            answer = "当前角色：" + self.roles.resolve(current.chat_id, current.principal_id)["name"]
+        elif command.name == "role_list":
+            answer = "可选角色：" + "、".join(r["name"] for r in self.roles.list() if r["enabled"] and r["user_selectable"])
+        elif command.name == "role_use":
+            role = next((r for r in self.roles.list() if r["name"] == command.argument), None)
+            if not role:
+                return "角色不存在，请用 /ai role list 查看。"
+            target = None if kind == "group" and current.access_level == "admin" else current.principal_id
+            try:
+                self.roles.bind(role["id"], current.chat_id, target, current.as_actor(), self_select=True)
+            except ValueError:
+                return "无权选择此角色。"
+            answer = "已切换角色：" + role["name"]
         elif command.name == "reset":
             if kind != "private":
                 self.permissions.audit_command(current, command.name, "group_scope_not_available")
