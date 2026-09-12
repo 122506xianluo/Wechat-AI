@@ -1,4 +1,5 @@
 """Transport-neutral values; never store UIA controls in worker jobs."""
+
 from dataclasses import dataclass, field
 
 
@@ -9,8 +10,8 @@ class InboundEvent:
     chat_id: int
     chat_kind: str
     sender_principal_id: int
-    content_type: str = 'text'
-    text: str = ''
+    content_type: str = "text"
+    text: str = ""
     attachments: list = field(default_factory=list)
     observed_at: float = 0
 

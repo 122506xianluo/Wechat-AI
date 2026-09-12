@@ -117,7 +117,7 @@ def test_clear_context_audit_confirm_and_running_guard(client, permissions, monk
     assert post(client, "/api/storage/clear-chat", {"kind": "private", "name": "Test Friend"}).status_code == 400
     monkeypatch.setattr(panel, "bot_running", lambda: False)
     assert post(client, "/api/storage/clear-all", {}).status_code == 400
-    assert storage.stats()["message_count"] == SCHEMA_VERSION
+    assert storage.stats()["message_count"] == 2
     assert post(client, "/api/storage/clear-chat", {"kind": "private", "name": "Test Friend"}).status_code == 200
     assert get(client, "/api/v1/audit").json["events"][0]["action"] == "context.clear"
     assert post(client, "/api/storage/clear-all", {"confirm": "clear-all"}).status_code == 200
@@ -153,7 +153,7 @@ def test_lazy_storage_initialization_imports_only_config(tmp_path, monkeypatch):
     monkeypatch.setattr(panel, "_storage", None)
     panel.CONFIG_FILE.write_text(json.dumps({"private_chats": ["Synthetic"]}), encoding="utf-8")
     storage = panel.get_storage()
-    assert storage.stats()["schema_version"] == 2
+    assert storage.stats()["schema_version"] == SCHEMA_VERSION
     assert panel.Permissions(storage).list_principals()[0]["status"] == "active"
 
 
