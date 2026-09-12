@@ -1,4 +1,5 @@
 """SQLite persistence for chat metadata, messages, and bounded LLM history."""
+
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -65,7 +66,8 @@ class Storage:
             connection.execute(
                 "INSERT INTO chats(kind, name, created_at, updated_at) VALUES(?, ?, ?, ?) "
                 "ON CONFLICT(kind, name) DO UPDATE SET updated_at=excluded.updated_at",
-                (kind, name, now, now))
+                (kind, name, now, now),
+            )
             row = connection.execute(
                 "SELECT id FROM chats WHERE kind=? AND name=?", (kind, name)
             ).fetchone()
@@ -74,6 +76,7 @@ class Storage:
 
     def register_targets(self, private_chats: list[str], groups: list[str]) -> None:
         from chats import Chats
+
         Chats(self).import_legacy(private_chats, groups)
 
     def chat_id(self, kind: str, name: str) -> int:
@@ -97,13 +100,18 @@ class Storage:
                 (id, chat_id, role, direction, content, status, source_key,
                  created_at, updated_at, error_message)
                 VALUES (?, ?, 'user', 'incoming', ?, 'pending', ?, ?, ?, NULL)""",
-                (message_id, chat_id, content, source_key or None, now, now))
+                (message_id, chat_id, content, source_key or None, now, now),
+            )
             connection.commit()
         return message_id
 
     def add_assistant(
-        self, kind: str, name: str, content: str, status: str = "sent",
-        error_message: str = ""
+        self,
+        kind: str,
+        name: str,
+        content: str,
+        status: str = "sent",
+        error_message: str = "",
     ) -> str:
         if status not in ("sent", "failed", "unknown"):
             raise ValueError("assistant 状态无效")
@@ -116,21 +124,27 @@ class Storage:
                 (id, chat_id, role, direction, content, status, source_key,
                  created_at, updated_at, error_message)
                 VALUES (?, ?, 'assistant', 'outgoing', ?, ?, NULL, ?, ?, ?)""",
-                (message_id, chat_id, content, status, now, now, error_message or None))
+                (message_id, chat_id, content, status, now, now, error_message or None),
+            )
             connection.commit()
         return message_id
 
-    def mark_message(self, message_id: str, status: str, error_message: str = "") -> None:
+    def mark_message(
+        self, message_id: str, status: str, error_message: str = ""
+    ) -> None:
         if status not in ("pending", "received", "sent", "failed", "unknown"):
             raise ValueError("消息状态无效")
         now = utc_now()
         with self._connection() as connection:
             connection.execute(
                 "UPDATE messages SET status=?, updated_at=?, error_message=? WHERE id=?",
-                (status, now, error_message or None, message_id))
+                (status, now, error_message or None, message_id),
+            )
             connection.commit()
 
-    def complete_turn(self, incoming_id: str, kind: str, name: str, content: str) -> str:
+    def complete_turn(
+        self, incoming_id: str, kind: str, name: str, content: str
+    ) -> str:
         """Commit an incoming turn and its verified outgoing answer together."""
         assistant_id = uuid.uuid4().hex
         now = utc_now()
@@ -139,7 +153,8 @@ class Storage:
             cursor = connection.execute(
                 "UPDATE messages SET status='received', updated_at=? "
                 "WHERE id=? AND chat_id=? AND status='pending' AND role='user' AND direction='incoming'",
-                (now, incoming_id, chat_id))
+                (now, incoming_id, chat_id),
+            )
             if cursor.rowcount != 1:
                 raise ValueError("入站记录不存在、已结束或不属于当前会话")
             connection.execute(
@@ -147,10 +162,18 @@ class Storage:
                 (id, chat_id, role, direction, content, status, source_key,
                  created_at, updated_at, error_message)
                 VALUES (?, ?, 'assistant', 'outgoing', ?, 'sent', NULL, ?, ?, NULL)""",
-                (assistant_id, chat_id, content, now, now))
-            connection.execute("UPDATE messages SET scope_id=(SELECT scope_id FROM messages WHERE id=?),sender_principal_id=(SELECT sender_principal_id FROM messages WHERE id=?),turn_id=? WHERE id=?", (incoming_id,incoming_id,incoming_id,assistant_id))
-            connection.execute("UPDATE messages SET turn_id=? WHERE id=?",(incoming_id,incoming_id))
-            connection.execute("UPDATE chats SET last_reply_at=? WHERE id=?",(now,chat_id))
+                (assistant_id, chat_id, content, now, now),
+            )
+            connection.execute(
+                "UPDATE messages SET scope_id=(SELECT scope_id FROM messages WHERE id=?),sender_principal_id=(SELECT sender_principal_id FROM messages WHERE id=?),turn_id=? WHERE id=?",
+                (incoming_id, incoming_id, incoming_id, assistant_id),
+            )
+            connection.execute(
+                "UPDATE messages SET turn_id=? WHERE id=?", (incoming_id, incoming_id)
+            )
+            connection.execute(
+                "UPDATE chats SET last_reply_at=? WHERE id=?", (now, chat_id)
+            )
         return assistant_id
 
     def recover_incomplete(self) -> int:
@@ -159,7 +182,8 @@ class Storage:
         with self._connection() as connection:
             cursor = connection.execute(
                 "UPDATE messages SET status='failed', updated_at=?, error_message=? WHERE status='pending'",
-                (now, "previous_run_interrupted"))
+                (now, "previous_run_interrupted"),
+            )
             connection.commit()
             return cursor.rowcount
 
@@ -176,17 +200,20 @@ class Storage:
                    ORDER BY created_at DESC, rowid DESC LIMIT ?""",
                 (chat_id, limit),
             ).fetchall()
-        return [{"role": row["role"], "content": row["content"]}
-                for row in reversed(rows)]
+        return [
+            {"role": row["role"], "content": row["content"]} for row in reversed(rows)
+        ]
 
     def stats(self) -> dict:
         with self._connection() as connection:
             chats = connection.execute("SELECT COUNT(*) FROM chats").fetchone()[0]
             messages = connection.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
             failed = connection.execute(
-                "SELECT COUNT(*) FROM messages WHERE status='failed'").fetchone()[0]
+                "SELECT COUNT(*) FROM messages WHERE status='failed'"
+            ).fetchone()[0]
             unknown = connection.execute(
-                "SELECT COUNT(*) FROM messages WHERE status='unknown'").fetchone()[0]
+                "SELECT COUNT(*) FROM messages WHERE status='unknown'"
+            ).fetchone()[0]
         try:
             size = self.path.stat().st_size
         except OSError:
@@ -212,25 +239,83 @@ class Storage:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def clear_chat(self, kind: str, name: str, *, actor_id: int | None = None,
-                   source: str = "system") -> int:
+    def clear_chat(
+        self,
+        kind: str,
+        name: str,
+        *,
+        actor_id: int | None = None,
+        source: str = "system",
+    ) -> int:
         with self.transaction() as connection:
             row = connection.execute(
-                "SELECT id FROM chats WHERE kind=? AND name=?", (kind, name)).fetchone()
+                "SELECT id FROM chats WHERE kind=? AND name=?", (kind, name)
+            ).fetchone()
             if row is None:
                 raise ValueError("会话不存在")
-            cursor = connection.execute("DELETE FROM messages WHERE chat_id=?", (row[0],))
+            if connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='message_jobs'"
+            ).fetchone():
+                active = connection.execute(
+                    "SELECT id,state FROM message_jobs WHERE chat_id=? AND state IN ('processing','sending','unknown')",
+                    (row[0],),
+                ).fetchall()
+                if active:
+                    raise ValueError("当前会话有发送中或结果不明任务，请先人工处理")
+                connection.execute(
+                    "UPDATE message_jobs SET state='cancelled',last_error='context_cleared',updated_at=strftime('%s','now') WHERE chat_id=? AND state IN ('queued','retry_wait','ready_to_send')",
+                    (row[0],),
+                )
+            cursor = connection.execute(
+                "DELETE FROM messages WHERE chat_id=?", (row[0],)
+            )
             deleted = cursor.rowcount
-            record_audit(connection, "context.clear", source=source, actor_id=actor_id,
-                         target_type="chat", target_id=row[0], details={"deleted": deleted})
+            if connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='conversation_scopes'"
+            ).fetchone():
+                connection.execute(
+                    "UPDATE conversation_scopes SET revision=revision+1 WHERE chat_id=?",
+                    (row[0],),
+                )
+            record_audit(
+                connection,
+                "context.clear",
+                source=source,
+                actor_id=actor_id,
+                target_type="chat",
+                target_id=row[0],
+                details={"deleted": deleted},
+            )
             return deleted
 
-    def clear_all_history(self, *, actor_id: int | None = None, source: str = "system") -> int:
+    def clear_all_history(
+        self, *, actor_id: int | None = None, source: str = "system"
+    ) -> int:
         with self.transaction() as connection:
+            if connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='message_jobs'"
+            ).fetchone():
+                active = connection.execute(
+                    "SELECT id,state FROM message_jobs WHERE state IN ('processing','sending','unknown')"
+                ).fetchall()
+                if active:
+                    raise ValueError("存在发送中或结果不明任务，请先人工处理")
+                connection.execute(
+                    "UPDATE message_jobs SET state='cancelled',last_error='context_cleared',updated_at=strftime('%s','now') WHERE state IN ('queued','retry_wait','ready_to_send')"
+                )
             cursor = connection.execute("DELETE FROM messages")
             deleted = cursor.rowcount
-            record_audit(connection, "context.clear_all", source=source, actor_id=actor_id,
-                         details={"deleted": deleted})
+            if connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='conversation_scopes'"
+            ).fetchone():
+                connection.execute("UPDATE conversation_scopes SET revision=revision+1")
+            record_audit(
+                connection,
+                "context.clear_all",
+                source=source,
+                actor_id=actor_id,
+                details={"deleted": deleted},
+            )
             return deleted
 
     def close(self) -> None:

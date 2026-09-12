@@ -130,7 +130,7 @@ class Contexts:
                 "SELECT 1 FROM sqlite_master WHERE name='message_jobs'"
             ).fetchone():
                 if c.execute(
-                    "SELECT 1 FROM message_jobs WHERE scope_id=? AND state IN ('processing','ready_to_send','sending')",
+                    "SELECT 1 FROM message_jobs WHERE scope_id=? AND state IN ('queued','retry_wait','processing','ready_to_send','sending','unknown')",
                     (scope_id,),
                 ).fetchone():
                     raise ValueError("当前范围有进行中的任务，请先取消或等待结束")
