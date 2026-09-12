@@ -117,14 +117,15 @@
     </section>
     <section class="card">
       <h2>回复对象</h2>
+      <div class="hint">聊天名单已由 SQLite 管理。请进入 <a href="/manage">管理后台 → 聊天/私聊用户</a> 批准或停用聊天；下方旧名单仅展示首次导入记录，修改配置不会重新导入。</div>
       <div class="row">
         <div>
-          <label>私聊（每行一个，通常是备注名）</label>
-          <textarea id="private_chats" placeholder="小暹罗"></textarea>
+          <label>旧版私聊名单（只读）</label>
+          <textarea id="private_chats" readonly></textarea>
         </div>
         <div>
-          <label>群聊（每行一个）</label>
-          <textarea id="groups" placeholder="测试群"></textarea>
+          <label>旧版群聊名单（只读）</label>
+          <textarea id="groups" readonly></textarea>
         </div>
       </div>
       <label>机器人群昵称 bot_names（mention 模式必填，必须和群里显示完全一致）</label>
@@ -139,8 +140,8 @@
       </div>
       <label>群前缀 group_prefix</label>
       <input id="group_prefix" type="text">
-      <label>系统提示 / 角色</label>
-      <textarea id="system_prompt" style="min-height:120px"></textarea>
+      <label>旧版初始系统提示（只读；当前角色请在管理后台编辑）</label>
+      <textarea id="system_prompt" style="min-height:120px" readonly></textarea>
       <details>
         <summary>高级</summary>
         <div class="row">
@@ -183,8 +184,8 @@
       <select id="storageChat"><option value="">暂无会话</option></select>
     </section>
     <section class="card">
-      <h2>身份与权限（第 3 步）</h2>
-      <div class="hint">当前仅本机临时 owner，第 8 步接入账号登录。微信身份不能成为 owner。权限修改下一条新消息生效；已在发送的消息无法撤回。</div>
+      <h2>身份与权限</h2>
+      <div class="hint">需要登录 Web 管理账户；仅后台账户可以成为 owner，微信身份不能成为 owner。权限修改下一条新消息生效；已在发送的消息无法撤回。</div>
       <div class="hint">群新昵称先待确认，不调用模型。昵称不是稳定微信 ID；遇到重名或改名，请先停用并人工核对，不要盲目授权。</div>
       <label for="principalSearch">搜索昵称或所在聊天（最多显示 200 个）</label>
       <input type="text" id="principalSearch" maxlength="256" placeholder="输入关键词后点击刷新">

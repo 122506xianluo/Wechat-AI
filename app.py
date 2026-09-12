@@ -59,8 +59,8 @@ def get_storage() -> Storage:
     if _storage is None:
         try:
             candidate = Storage(ROOT)
-            # Stage 3 keeps the explicit config whitelist; stage 5 will import it
-            # once and make SQLite authoritative. Never read or persist .env here.
+            # Import legacy targets once; SQLite remains authoritative after import.
+            # Never read or persist .env here.
             if CONFIG_FILE.exists():
                 raw = json.loads(CONFIG_FILE.read_text(encoding="utf-8-sig"))
                 cfg = config_from_payload(raw)
@@ -322,7 +322,7 @@ def api_principals():
             raise ValueError("搜索文本过长")
         service = Permissions(get_storage())
         return jsonify(ok=True, principals=service.list_principals(query),
-                       revision=service.revision(), temporary_local_owner=True)
+                       revision=service.revision(), temporary_local_owner=False)
     except Exception as exc:
         return management_error(exc)
 
