@@ -17,10 +17,12 @@ import webbrowser
 from urllib.parse import urlsplit
 
 import httpx
-from flask import Flask, g, jsonify, render_template, request
+from flask import Flask, g, jsonify, render_template, request, redirect
 
 from bot import Config, LLMSettings
-from permissions import LOCAL_OWNER, PermissionDenied, Permissions
+from permissions import PermissionDenied, Permissions
+from auth import Auth
+from auth_web import register_auth
 from storage import Storage
 from admin_api import register_admin
 
@@ -46,7 +48,7 @@ DETACHED = 0x00000008 | 0x00000200 | CREATE_NO_WINDOW
 
 app = Flask(__name__)
 app.json.ensure_ascii = False
-app.config["MAX_CONTENT_LENGTH"] = 128 * 1024
+app.config["MAX_CONTENT_LENGTH"] = 72 * 1024 * 1024
 app.config["LOCAL_CSRF_TOKEN"] = secrets.token_urlsafe(32)
 _storage = None
 _storage_error = None
@@ -132,12 +134,11 @@ def write_env(base_url: str, api_key: str, model: str):
     current["LLM_MODEL"] = model.strip()
     if api_key.strip():
         current["LLM_API_KEY"] = api_key.strip()
-    ENV_FILE.write_text(
-        "# OpenAI-compatible Chat Completions endpoint.\n"
-        f"LLM_BASE_URL={current.get('LLM_BASE_URL', '')}\n"
-        f"LLM_API_KEY={current.get('LLM_API_KEY', '')}\n"
-        f"LLM_MODEL={current.get('LLM_MODEL', '')}\n",
-        encoding="utf-8")
+    for value in current.values():
+        if '\n' in value or '\r' in value:
+            raise ValueError('环境配置不能包含换行')
+    ENV_FILE.write_text(''.join(k+'='+v+'\n' for k,v in current.items()),encoding='utf-8')
+
 
 
 def mask_secret(value: str):
@@ -271,13 +272,21 @@ def enforce_local_owner():
     if (origin is not None and origin != request.host_url.rstrip("/")) or request.headers.get(
             "Sec-Fetch-Site") == "cross-site":
         return fail("不允许跨站控制本机机器人", 403)
-    if request.method not in ("GET", "HEAD", "OPTIONS"):
-        token = request.headers.get("X-CSRF-Token", "")
-        if not secrets.compare_digest(token.encode("utf-8"), app.config["LOCAL_CSRF_TOKEN"].encode("utf-8")):
-            return fail("页面验证已过期，请刷新控制台", 403)
-        if not request.is_json or not isinstance(request.get_json(silent=True), dict):
-            return fail("请求必须是 JSON 对象", 400)
-    g.actor = LOCAL_OWNER
+    public = request.path in ('/login','/api/v1/auth/status','/api/v1/auth/init','/api/v1/auth/login','/api/v1/auth/recover') or request.path.startswith('/static/')
+    session = None if public else Auth(get_storage()).session(request.cookies.get('wechat_ai_session'))
+    if not public and not session:
+        return fail("请先登录",401) if request.path.startswith('/api/') else redirect('/login')
+    g.csrf = session[1] if session else app.config['LOCAL_CSRF_TOKEN']
+    if session:
+        g.actor,g.account_id = session[0],session[2]
+    if request.method not in ('GET','HEAD','OPTIONS'):
+        token=request.headers.get('X-CSRF-Token','')
+        if not secrets.compare_digest(token.encode(),g.csrf.encode()):
+            return fail('页面验证已过期，请刷新',403)
+        if not request.is_json or not isinstance(request.get_json(silent=True),dict):
+            return fail('请求必须是 JSON 对象',400)
+    if session and g.actor.access_level!='owner' and request.path in ('/api/save','/api/test','/api/v1/test','/api/v1/settings','/api/v1/capabilities/test'):
+        return fail('配置和密钥仅 owner 可修改',403)
 
 
 @app.after_request
@@ -366,7 +375,7 @@ def api_audit():
 
 @app.get("/")
 def index():
-    return render_template("index.html", csrf_token=app.config["LOCAL_CSRF_TOKEN"])
+    return render_template("index.html", csrf_token=g.csrf)
 
 
 @app.get("/api/state")
@@ -457,7 +466,7 @@ def api_save():
         ok, output = run_check()
         if not ok:
             return fail(output or "配置检查未通过")
-        return jsonify({"ok": True, "message": "已保存"})
+        return jsonify({"ok": True, "message": "已保存，下次启动生效", "restart_required": True})
     except Exception as exc:
         return fail(str(exc))
 
@@ -480,7 +489,7 @@ def api_test():
                     "temperature": 0,
                 })
         if response.status_code >= 400:
-            return fail("模型接口 HTTP %s: %s" % (response.status_code, response.text[:300]))
+            return fail("模型接口 HTTP %s（上游正文已隐藏）" % response.status_code)
         payload = response.json()
         text = (((payload.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
         return jsonify({"ok": True, "message": "模型可用", "reply": text[:200] or "(空回复)"})
@@ -490,6 +499,8 @@ def api_test():
 
 @app.post("/api/start")
 def api_start():
+    if g.actor.access_level != "owner":
+        return fail("启动并保存配置仅 owner 可操作", 403)
     if bot_running():
         return fail("已经在运行")
     data = request.get_json(silent=True) or {}
@@ -528,10 +539,7 @@ def api_start():
 @app.post("/api/stop")
 def api_stop():
     if not bot_running():
-        try:
-            STOP_FILE.unlink(missing_ok=True)
-        except OSError:
-            pass
+        STOP_FILE.write_text("stop\n", encoding="ascii")
         return jsonify({"ok": True, "message": "当前未运行"})
     STOP_FILE.write_text("stop\n", encoding="ascii")
     deadline = time.monotonic() + 20.0
@@ -612,8 +620,11 @@ def dump_error(exc=None):
         pass
 
 
-app.bot_is_running = bot_running
+app.bot_is_running = lambda: bot_running()
+register_auth(app, get_storage, management_error)
 register_admin(app, get_storage, management_error)
+for _name in ("state", "start", "stop", "test", "log"):
+    app.add_url_rule("/api/v1/" + _name, "v1_" + _name, globals()["api_" + _name], methods=["GET"] if _name in ("state", "log") else ["POST"])
 
 
 def main() -> int:

@@ -152,4 +152,51 @@ def register_admin(app, get_storage, error):
         )
         return jsonify(ok=True)
 
+    @api.get("/api/v1/settings")
+    def settings_get():
+        with get_storage()._connection() as c:
+            from roles import require_manager
+
+            require_manager(c, g.actor, owner=True)
+            rows = [dict(r) for r in c.execute("SELECT * FROM runtime_settings")]
+        return jsonify(ok=True, items=rows)
+
+    @api.get("/api/v1/backups")
+    def backups_list():
+        from roles import require_manager
+
+        with get_storage()._connection() as c:
+            require_manager(c, g.actor, owner=True)
+        folder = get_storage().path.parent / "backups"
+        return jsonify(
+            ok=True,
+            items=[
+                {"name": p.name, "size_bytes": p.stat().st_size}
+                for p in sorted(folder.glob("*.db"), reverse=True)
+            ],
+        )
+
+    @api.post("/api/v1/backups")
+    def backup_create():
+        from migrations import backup_database, SCHEMA_VERSION
+        from roles import require_manager
+
+        with get_storage()._connection() as c:
+            require_manager(c, g.actor, owner=True)
+            path = backup_database(
+                c, get_storage().path.parent / "backups", SCHEMA_VERSION
+            )
+        return jsonify(ok=True, name=path.name)
+
+    @api.get("/api/v1/notifications")
+    def notifications():
+        with get_storage()._connection() as c:
+            rows = [
+                dict(r)
+                for r in c.execute(
+                    "SELECT * FROM notifications ORDER BY id DESC LIMIT 100"
+                )
+            ]
+        return jsonify(ok=True, items=rows)
+
     app.register_blueprint(api)

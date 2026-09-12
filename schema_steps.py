@@ -119,3 +119,17 @@ def v6(c):
                 pending = None
             else:
                 pending = None
+
+
+def v7(c):
+    statements(
+        c,
+        (
+            "CREATE TABLE web_accounts(id INTEGER PRIMARY KEY,principal_id INTEGER UNIQUE NOT NULL REFERENCES principals(id),username TEXT UNIQUE NOT NULL,password_hash TEXT NOT NULL,recovery_hash TEXT,enabled INTEGER NOT NULL DEFAULT 1,created_at TEXT DEFAULT CURRENT_TIMESTAMP)",
+            "CREATE TABLE web_sessions(token_hash TEXT PRIMARY KEY,account_id INTEGER NOT NULL REFERENCES web_accounts(id) ON DELETE CASCADE,csrf_token TEXT NOT NULL,expires_at REAL NOT NULL,created_at REAL NOT NULL)",
+            "CREATE TABLE login_attempts(id INTEGER PRIMARY KEY,username TEXT NOT NULL,source TEXT NOT NULL,at REAL NOT NULL,success INTEGER NOT NULL)",
+            "CREATE INDEX login_window ON login_attempts(at,username,source)",
+            "CREATE TABLE notifications(id INTEGER PRIMARY KEY,kind TEXT NOT NULL,content TEXT NOT NULL,read_at TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP)",
+            "CREATE TABLE runtime_settings(key TEXT PRIMARY KEY,value TEXT NOT NULL,revision INTEGER NOT NULL DEFAULT 1,updated_at TEXT DEFAULT CURRENT_TIMESTAMP)",
+        ),
+    )
