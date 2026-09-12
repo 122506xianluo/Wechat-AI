@@ -141,6 +141,8 @@ class Message:
     sender_name: str = ""
     direction: str = "unknown"
     direction_verified: bool = False
+    content_type: str = "text"
+    attachments: list[dict] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -533,7 +535,9 @@ class WeChatDesktop:
                 continue
             for index in indices:
                 row = rows[index]
-                if row.class_name() != "mmui::ChatTextItemView":
+                from ui_media import descriptor
+                attachment = descriptor(row, tokens[index], sum(t == tokens[index] for t in tokens[:index]))
+                if row.class_name() != "mmui::ChatTextItemView" and attachment is None:
                     continue
                 self.require_foreground()
                 text = row.window_text()
@@ -562,10 +566,16 @@ class WeChatDesktop:
                     continue
                 candidate = Message(
                     uuid.uuid4().hex, session.name, kind, text, source_key=source_key,
-                    sender_name=sender, direction=direction, direction_verified=verified)
+                    sender_name=sender, direction=direction, direction_verified=verified,
+                    content_type=attachment["content_type"] if attachment else "text",
+                    attachments=[attachment] if attachment else [])
                 messages.append(candidate)
         self.chats.set_visibility(seen)
         return messages
+
+    def capture_attachment(self, message, descriptor):
+        from ui_media import capture
+        return capture(self, message, descriptor)
 
     def send(self, message: Message, answer: str, *, before_fill=None):
         self.require_foreground()
@@ -627,12 +637,12 @@ class ChatLLM:
     def close(self):
         self.client.close()
 
-    def reply(self, question: str, history: list[dict], *, role=None) -> str:
+    def reply(self, question: str, history: list[dict], *, role=None, images=None) -> str:
         role = role or {}
         payload = {
             "model": role.get("model") or self.settings.model,
             "messages": ([{"role": "system", "content": role.get("system_prompt", self.cfg.system_prompt)}]
-                         + history + [{"role": "user", "content": question}]),
+                         + history + [{"role": "user", "content": ([{"type":"text","text":question}] + images) if images else question}]),
             "max_tokens": role.get("max_tokens", self.cfg.max_tokens),
             "temperature": role.get("temperature", 0.7),
         }
@@ -687,6 +697,9 @@ class Bot:
         self.desktop.chats = self.chats
         self.llm = llm if llm is not None else ChatLLM(settings, cfg)
         from engine import Engine
+        from media import Media
+        self.media = Media(self.storage, settings)
+        self.media.cleanup()
         self.engine = Engine(self)
 
     def process_message(self, message: Message) -> bool:
@@ -726,10 +739,7 @@ class Bot:
                 log.info("ready history_rebaselined=true")
             try:
                 messages = self.desktop.poll()
-                for message in messages:
-                    if self.stopped():
-                        break
-                    self.engine.observe(message)
+                self.engine.observe_batch(messages)
                 self.engine.tick()
             except FocusLost:
                 ready = False

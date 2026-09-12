@@ -213,4 +213,37 @@ def register_admin(app, get_storage, error):
         )
         return jsonify(ok=True, id=result)
 
+    from media import Media
+    from providers import Capabilities
+
+    @api.get("/api/v1/attachments")
+    def attachments_list():
+        media = Media(get_storage())
+        media.cleanup()
+        return jsonify(ok=True, items=media.list())
+
+    @api.get("/api/v1/capabilities")
+    def capabilities_list():
+        return jsonify(ok=True, items=Capabilities(get_storage()).list())
+
+    @api.post("/api/v1/capabilities/<name>/test")
+    def capability_probe(name):
+        import base64
+
+        data = payload()
+        if data.get("confirm") is not True:
+            raise ValueError("能力检查将向配置的服务发送样本并可能计费，请确认")
+        sample = None
+        if data.get("sample"):
+            try:
+                sample = base64.b64decode(data["sample"], validate=True)
+            except Exception as exc:
+                raise ValueError("样本编码无效") from exc
+        return jsonify(
+            ok=True,
+            **Capabilities(get_storage()).probe(
+                name, g.actor, sample=sample, filename=data.get("filename")
+            ),
+        )
+
     app.register_blueprint(api)

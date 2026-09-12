@@ -149,3 +149,16 @@ def v8(c):
             "CREATE TABLE queue_fairness(chat_id INTEGER PRIMARY KEY REFERENCES chats(id),last_claim REAL NOT NULL)",
         ),
     )
+
+
+def v9(c):
+    statements(
+        c,
+        (
+            "ALTER TABLE messages ADD COLUMN content_type TEXT NOT NULL DEFAULT 'text'",
+            "ALTER TABLE messages ADD COLUMN structured_content TEXT NOT NULL DEFAULT '{}'",
+            "CREATE TABLE attachments(id TEXT PRIMARY KEY,message_id TEXT REFERENCES messages(id) ON DELETE SET NULL,chat_id INTEGER NOT NULL REFERENCES chats(id),principal_id INTEGER REFERENCES principals(id),content_type TEXT NOT NULL,original_name TEXT NOT NULL,relative_path TEXT,sha256 TEXT,size_bytes INTEGER NOT NULL DEFAULT 0,mime_type TEXT,status TEXT NOT NULL,error TEXT,created_at REAL NOT NULL,expires_at REAL NOT NULL)",
+            "CREATE INDEX attachment_retention ON attachments(expires_at,status)",
+            "CREATE TABLE attachment_extractions(attachment_id TEXT PRIMARY KEY REFERENCES attachments(id) ON DELETE CASCADE,method TEXT NOT NULL,content TEXT NOT NULL DEFAULT '',status TEXT NOT NULL,updated_at REAL NOT NULL)",
+        ),
+    )

@@ -80,6 +80,10 @@ class JobQueue:
             )
         return jid
 
+    def seen(self, chat_id, source_key):
+        with self.storage._connection() as c:
+            return c.execute("SELECT 1 FROM inbound_dedup WHERE chat_id=? AND source_key=?", (chat_id,source_key)).fetchone() is not None
+
     def get(self, jid):
         with self.storage._connection() as c:
             r = c.execute("SELECT * FROM message_jobs WHERE id=?", (jid,)).fetchone()
