@@ -325,3 +325,43 @@ def test_config_check_uses_utf8_without_starting_bot(client, monkeypatch):
     args, kwargs = calls[0]
     assert args[1:3] == ["-X", "utf8"] and args[-1] == "--check"
     assert kwargs["encoding"] == "utf-8" and kwargs["capture_output"]
+
+
+def test_owner_initialization_logs_in_and_enters_console(tmp_path, monkeypatch):
+    # Use a fresh database so the first-run /init path is exercised.
+    monkeypatch.setattr(panel, "ROOT", tmp_path)
+    monkeypatch.setattr(panel, "_storage", panel.Storage(tmp_path))
+    monkeypatch.setattr(panel, "CONFIG_FILE", tmp_path / "config.json")
+    monkeypatch.setattr(panel, "ENV_FILE", tmp_path / ".env")
+    monkeypatch.setattr(panel, "BOT_PID", tmp_path / "data" / "bot.pid")
+    monkeypatch.setattr(panel, "LOG_FILE", tmp_path / "data" / "bot.log")
+    monkeypatch.setattr(panel, "PANEL_LOG", tmp_path / "data" / "panel.log")
+    monkeypatch.setattr(panel, "SETUP_LOG", tmp_path / "data" / "setup.log")
+    panel.app.config.update(TESTING=True, LOCAL_CSRF_TOKEN="synthetic-csrf-token")
+
+    client = panel.app.test_client()
+    response = client.post(
+        "/api/v1/auth/init",
+        base_url=BASE,
+        json={"username": "first-owner", "password": "synthetic-password"},
+        headers={"X-CSRF-Token": "synthetic-csrf-token"},
+    )
+
+    assert response.status_code == 200
+    assert response.json["authenticated"] is True
+    assert response.json["csrf_token"]
+    assert response.json["recovery_code"]
+    assert any(
+        "wechat_ai_session=" in value
+        for value in response.headers.getlist("Set-Cookie")
+    )
+
+    console = client.get("/", base_url=BASE)
+    assert console.status_code == 200
+    assert "登录管理后台" not in console.get_data(as_text=True)
+
+
+def test_owner_initialization_page_offers_console_button():
+    source = Path(panel.app.template_folder, "login.html").read_text(encoding="utf-8")
+    assert "我已保存恢复码，进入控制台" in source
+    assert "保存后刷新页面登录" not in source

@@ -32,8 +32,32 @@ def register_auth(app, storage, error):
     @api.post("/api/v1/auth/init")
     def init():
         d = request.get_json()
-        recovery = Auth(storage()).create(d.get("username"), d.get("password"))
-        return jsonify(ok=True, recovery_code=recovery)
+        auth = Auth(storage())
+        recovery = auth.create(d.get("username"), d.get("password"))
+
+        # Initialization is also the first login.  Create the same authenticated
+        # session as the normal login endpoint so the user can enter the console
+        # after saving the one-time recovery code without typing credentials again.
+        token, csrf = auth.login(
+            d.get("username"), d.get("password"), request.remote_addr
+        )
+        response = make_response(
+            jsonify(
+                ok=True,
+                recovery_code=recovery,
+                csrf_token=csrf,
+                authenticated=True,
+            )
+        )
+        response.set_cookie(
+            "wechat_ai_session",
+            token,
+            max_age=43200,
+            httponly=True,
+            samesite="Strict",
+            secure=False,
+        )
+        return response
 
     @api.post("/api/v1/auth/login")
     def login():
