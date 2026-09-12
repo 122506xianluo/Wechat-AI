@@ -27,18 +27,25 @@ class Endpoint:
         return sha256((self.base + "|" + self.model).encode()).hexdigest()
 
 
-def endpoint(kind, llm=None, model=None):
-    from bot import LLMSettings
+def endpoint(kind, llm=None, model=None, root=None):
+    from bot import LLMSettings, ROOT
+    from dotenv import dotenv_values
 
-    llm = llm or LLMSettings.from_env()
+    values = dotenv_values((root or ROOT) / ".env")
+
+    def value(key):
+        return str(values.get(key) or os.getenv(key, "")).strip()
+
+    llm = llm or LLMSettings(
+        *(value("LLM_" + key) for key in ("BASE_URL", "API_KEY", "MODEL"))
+    )
     prefix = {"embeddings": "EMBEDDING", "transcription": "TRANSCRIPTION"}.get(
         kind, "LLM"
     )
-    base = os.getenv(prefix + "_BASE_URL", "").strip() or llm.base_url
+    base = (value(prefix + "_BASE_URL") if prefix != "LLM" else "") or llm.base_url
     base = base.removesuffix("/chat/completions").rstrip("/")
-    key = os.getenv(prefix + "_API_KEY", "").strip() or llm.api_key
-    configured = os.getenv(prefix + "_MODEL", "").strip()
-    chosen = model or configured or (llm.model if prefix == "LLM" else "")
+    key = (value(prefix + "_API_KEY") if prefix != "LLM" else "") or llm.api_key
+    chosen = model or (value(prefix + "_MODEL") if prefix != "LLM" else llm.model)
     LLMSettings(base, key, chosen).validate()
     return Endpoint(base, key, chosen)
 
@@ -49,7 +56,7 @@ class Capabilities:
 
     def enabled(self, name, model=None):
         try:
-            target = endpoint(name, self.llm, model)
+            target = endpoint(name, self.llm, model, self.storage.root)
         except ValueError:
             return False
         with self.storage._connection() as c:
@@ -92,7 +99,7 @@ class Capabilities:
             raise ValueError("未知能力")
         with self.storage._connection() as c:
             require_manager(c, actor, owner=True)
-        target = endpoint(name, self.llm)
+        target = endpoint(name, self.llm, root=self.storage.root)
         error = None
         try:
             with httpx.Client(timeout=45, follow_redirects=False) as client:

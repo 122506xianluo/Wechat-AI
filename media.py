@@ -310,7 +310,7 @@ class Media:
                         raise UnsupportedMedia("请先配置并检查语音转写能力")
                     with httpx.Client(timeout=90, follow_redirects=False) as client:
                         extracted = transcribe(
-                            endpoint("transcription", self.llm),
+                            endpoint("transcription", self.llm, root=self.storage.root),
                             raw,
                             row["original_name"],
                             client=client,
