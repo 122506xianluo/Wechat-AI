@@ -61,3 +61,17 @@ def v4(c):
             "CREATE TABLE user_profiles(principal_id INTEGER PRIMARY KEY REFERENCES principals(id),note TEXT NOT NULL DEFAULT '',updated_at TEXT DEFAULT CURRENT_TIMESTAMP)",
         ),
     )
+
+
+def v5(c):
+    statements(
+        c,
+        (
+            "CREATE TABLE principal_aliases(id INTEGER PRIMARY KEY,chat_id INTEGER NOT NULL REFERENCES chats(id),principal_id INTEGER NOT NULL REFERENCES principals(id),name TEXT NOT NULL,normalized_name TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'active',created_at TEXT DEFAULT CURRENT_TIMESTAMP,UNIQUE(chat_id,principal_id,normalized_name))",
+            "CREATE INDEX alias_lookup ON principal_aliases(chat_id,normalized_name,status)",
+            "CREATE TABLE sender_observations(id INTEGER PRIMARY KEY,chat_id INTEGER NOT NULL REFERENCES chats(id),principal_id INTEGER REFERENCES principals(id),method TEXT NOT NULL,confidence REAL NOT NULL,reason TEXT NOT NULL,features TEXT NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP)",
+            "CREATE INDEX observation_chat ON sender_observations(chat_id,id)",
+            "CREATE TABLE member_rosters(chat_id INTEGER PRIMARY KEY REFERENCES chats(id),synced_at TEXT NOT NULL,member_count INTEGER NOT NULL)",
+            "INSERT INTO principal_aliases(chat_id,principal_id,name,normalized_name) SELECT chat_id,id,display_name,normalized_name FROM principals WHERE kind='group_member'",
+        ),
+    )

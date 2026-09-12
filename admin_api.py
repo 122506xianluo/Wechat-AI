@@ -83,4 +83,47 @@ def register_admin(app, get_storage, error):
         Chats(get_storage()).merge(chat_id, int(data["target"]), g.actor)
         return jsonify(ok=True)
 
+    from members import Members
+
+    @api.get("/api/v1/members/diagnostics")
+    def member_diagnostics():
+        return jsonify(
+            ok=True,
+            items=Members(get_storage()).diagnostics(
+                request.args.get("chat_id", type=int)
+            ),
+        )
+
+    @api.post("/api/v1/members/<int:principal_id>/merge")
+    def member_merge(principal_id):
+        data = payload()
+        if app.bot_is_running() or data.get("confirm") is not True:
+            raise ValueError("必须停机并明确确认合并")
+        Members(get_storage()).merge(principal_id, int(data["target"]), g.actor)
+        return jsonify(ok=True)
+
+    @api.post("/api/v1/chats/<int:chat_id>/sync-members")
+    def member_sync(chat_id):
+        if app.bot_is_running() or payload().get("confirm") is not True:
+            raise ValueError("请停止机器人；同步将操作微信界面，需明确确认")
+        with get_storage()._connection() as c:
+            from roles import require_manager
+
+            require_manager(c, g.actor)
+            row = c.execute(
+                "SELECT name FROM chats WHERE id=? AND kind='group'", (chat_id,)
+            ).fetchone()
+        if not row:
+            raise ValueError("群不存在")
+        from bot import InstanceLock
+        from ui_maintenance import read_group_roster
+
+        lock = InstanceLock(get_storage().root / "data" / "bot.lock")
+        try:
+            names = read_group_roster(row[0])
+            result = Members(get_storage()).sync_roster(chat_id, names, g.actor)
+        finally:
+            lock.close()
+        return jsonify(ok=True, **result)
+
     app.register_blueprint(api)

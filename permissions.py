@@ -150,7 +150,13 @@ class Permissions:
                 return AccessDecision(None, chat_id, "blocked", False, "sender_invalid")
             if not normalized_sender:
                 return AccessDecision(None, chat_id, "blocked", False, "sender_unknown")
-            principal_id = self.observe_group_sender(chat_id, sender_name)
+            from members import Members
+            principal_id = getattr(self, "members", None)
+            if principal_id is None:
+                self.members = Members(self.storage)
+            principal_id = self.members.observe(chat_id, sender_name)
+            if principal_id is None:
+                return AccessDecision(None, chat_id, "blocked", False, "sender_ambiguous")
         else:
             with self.storage._connection() as connection:
                 row = connection.execute(

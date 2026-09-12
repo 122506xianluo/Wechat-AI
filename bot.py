@@ -250,26 +250,8 @@ def _normalized_wechat_name(value: str) -> str:
 
 
 def group_sender_name(row) -> str:
-    """Read the group sender from WeChat's avatar Button without mouse input."""
-    candidates = []
-    try:
-        children = row.children()
-        if children:
-            candidates.extend(children[0].children(control_type="Button"))
-    except Exception:
-        pass
-    if not candidates:
-        for ctrl in _walk_children(row, max_depth=5):
-            if "button" in _control_type_name(ctrl).lower():
-                candidates.append(ctrl)
-    for ctrl in candidates:
-        try:
-            name = (ctrl.window_text() or "").strip()
-        except Exception:
-            continue
-        if name:
-            return name
-    return ""
+    from members import extract_sender
+    return extract_sender(row)[0]
 
 
 def uia_row_direction(row) -> str:
@@ -560,7 +542,17 @@ class WeChatDesktop:
                     direction = row_direction(row, self.scale, kind, self.cfg.bot_names)
                     # Commands require UIA evidence, not a trigger or screenshot.
                     verified = uia_row_direction(row) == "incoming"
-                    sender = group_sender_name(row) if kind == "group" else session.name
+                    if kind == "group":
+                        from members import extract_sender
+                        with self.chats.storage._connection() as connection:
+                            aliases = [r[0] for r in connection.execute("SELECT name FROM principal_aliases WHERE chat_id=? AND status='active'", (chat["id"],))]
+                        sender, method, confidence = extract_sender(row, aliases)
+                        if not hasattr(self, "members"):
+                            from members import Members
+                            self.members = Members(self.chats.storage)
+                        self.members.observe(chat["id"], sender, method, confidence)
+                    else:
+                        sender = session.name
                 except Exception:
                     direction, verified, sender = "unknown", False, ""
                 self.require_foreground()
@@ -668,6 +660,9 @@ class Bot:
         self.permissions = Permissions(self.storage)
         self.commands = Commands(self.permissions)
         self.roles = Roles(self.storage)
+        from members import Members
+        self.members = Members(self.storage)
+        self.permissions.members = self.members
         self.policy = Policy(cfg, self.chats)
         self.desktop = desktop if desktop is not None else WeChatDesktop(cfg)
         self.desktop.chats = self.chats
