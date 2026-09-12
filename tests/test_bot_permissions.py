@@ -116,7 +116,7 @@ def test_private_commands_and_reset_only_self(bot_env):
     assert not bot.storage.history("private", "Test Friend", 8)
     assert len(bot.storage.history("private", "Other Friend", 8)) == 2
     assert len(desktop.sent) == 5
-    assert "context.clear" in [e["action"] for e in bot.permissions.list_audit()]
+    assert "context.clear_scope" in [e["action"] for e in bot.permissions.list_audit()]
 
 
 def test_group_reset_never_erases_others(bot_env):
@@ -124,8 +124,8 @@ def test_group_reset_never_erases_others(bot_env):
     allow_group(bot, "admin")
     bot.process_message(incoming("hello", kind="group", chat="Test Group"))
     bot.process_message(incoming("/ai reset", kind="group", chat="Test Group"))
-    assert len(bot.storage.history("group", "Test Group", 8)) == 2
-    assert len(llm.calls) == 1 and "不通过微信清空群" in desktop.sent[-1][1]
+    assert len(bot.storage.history("group", "Test Group", 8)) == 0
+    assert len(llm.calls) == 1 and "独立上下文" in desktop.sent[-1][1]
 
 
 def test_group_normal_trigger_checked_after_permissions(bot_env):

@@ -24,7 +24,7 @@ CREATE INDEX idx_messages_chat_role_status ON messages(chat_id,role,status);
 CREATE TABLE schema_meta (key TEXT PRIMARY KEY,value TEXT NOT NULL);
 INSERT INTO schema_meta VALUES('schema_version','1');
 INSERT INTO chats VALUES(1,'private','Synthetic Friend',1,'2026-01-01','2026-01-01');
-INSERT INTO messages VALUES('old',1,'user','incoming','synthetic history','received',
+INSERT INTO messages(id,chat_id,role,direction,content,status,source_key,created_at,updated_at,error_message) VALUES('old',1,'user','incoming','synthetic history','received',
  'old-source','2026-01-01','2026-01-01',NULL);
 PRAGMA user_version=1;
 """
@@ -111,7 +111,7 @@ def test_bad_database_does_not_get_recreated(tmp_path):
 
 def test_foreign_key_corruption_fails_integrity(storage):
     with sqlite3.connect(storage.path) as connection:
-        connection.execute("INSERT INTO messages VALUES('bad',999,'user','incoming','test','failed',NULL,'t','t',NULL)")
+        connection.execute("INSERT INTO messages(id,chat_id,role,direction,content,status,source_key,created_at,updated_at,error_message) VALUES('bad',999,'user','incoming','test','failed',NULL,'t','t',NULL)")
     with pytest.raises(RuntimeError, match="完整性"):
         Storage(storage.root)
 

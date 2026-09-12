@@ -7,7 +7,7 @@ import re
 from permissions import AccessDecision, Permissions
 from roles import Roles
 
-HELP = "可用命令：/ai help、/ai status、/ai reset、/ai role、/ai role list、/ai role use <角色名>。群内 status 仅管理员可用；群成员独立清空将在步骤 7 开放。"
+HELP = "可用命令：/ai help、/ai status、/ai reset、/ai role、/ai role list、/ai role use <角色名>。群内 status 仅管理员可用；reset 仅清空自己的独立上下文。"
 
 
 @dataclass(frozen=True)
@@ -73,11 +73,14 @@ class Commands:
                 return "无权选择此角色。"
             answer = "已切换角色：" + role["name"]
         elif command.name == "reset":
-            if kind != "private":
-                self.permissions.audit_command(current, command.name, "group_scope_not_available")
-                return "当前版本不通过微信清空群共享历史，避免影响其他成员。请在本机后台管理；成员独立清空将在步骤 7 开放。"
-            self.permissions.reset_private_context(current)
-            return "已清空你在本私聊中的上下文，其他会话不受影响。"
+            from contexts import Contexts
+            contexts = Contexts(self.permissions.storage)
+            scope = contexts.resolve(current.chat_id,current.principal_id)
+            try:
+                contexts.clear(scope['id'],current.as_actor())
+            except ValueError:
+                return "共享上下文或当前有未完成任务，请在后台处理。"
+            answer = "已清空你在当前会话中的独立上下文。"
         else:
             return None
         self.permissions.audit_command(current, command.name, "executed")

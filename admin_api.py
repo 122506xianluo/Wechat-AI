@@ -126,4 +126,30 @@ def register_admin(app, get_storage, error):
             lock.close()
         return jsonify(ok=True, **result)
 
+    from contexts import Contexts
+
+    @api.get("/api/v1/contexts")
+    def contexts_list():
+        return jsonify(ok=True, items=Contexts(get_storage()).list())
+
+    @api.post("/api/v1/contexts/<int:scope_id>/clear")
+    def context_clear(scope_id):
+        if payload().get("confirm") is not True:
+            raise ValueError("需要二次确认")
+        return jsonify(
+            ok=True, deleted=Contexts(get_storage()).clear(scope_id, g.actor)
+        )
+
+    @api.get("/api/v1/contexts/<int:scope_id>/history")
+    def context_history(scope_id):
+        return jsonify(ok=True, items=Contexts(get_storage()).history(scope_id, 50))
+
+    @api.post("/api/v1/chats/<int:chat_id>/context-mode")
+    def context_mode(chat_id):
+        data = payload()
+        Contexts(get_storage()).set_mode(
+            chat_id, data["mode"], g.actor, data.get("confirm", False)
+        )
+        return jsonify(ok=True)
+
     app.register_blueprint(api)

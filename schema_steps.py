@@ -75,3 +75,47 @@ def v5(c):
             "INSERT INTO principal_aliases(chat_id,principal_id,name,normalized_name) SELECT chat_id,id,display_name,normalized_name FROM principals WHERE kind='group_member'",
         ),
     )
+
+
+def v6(c):
+    statements(
+        c,
+        (
+            "ALTER TABLE chats ADD COLUMN context_mode TEXT NOT NULL DEFAULT 'member'",
+            "CREATE TABLE conversation_scopes(id INTEGER PRIMARY KEY,chat_id INTEGER NOT NULL REFERENCES chats(id),principal_id INTEGER REFERENCES principals(id),mode TEXT NOT NULL CHECK(mode IN ('private','group_shared','group_member')),revision INTEGER NOT NULL DEFAULT 0,created_at TEXT DEFAULT CURRENT_TIMESTAMP)",
+            "CREATE UNIQUE INDEX scope_identity ON conversation_scopes(chat_id,COALESCE(principal_id,0),mode)",
+            "ALTER TABLE messages ADD COLUMN scope_id INTEGER REFERENCES conversation_scopes(id)",
+            "ALTER TABLE messages ADD COLUMN sender_principal_id INTEGER REFERENCES principals(id)",
+            "ALTER TABLE messages ADD COLUMN turn_id TEXT",
+            "CREATE INDEX message_scope_turn ON messages(scope_id,turn_id,status)",
+            "CREATE TABLE group_summaries(chat_id INTEGER PRIMARY KEY REFERENCES chats(id),content TEXT NOT NULL DEFAULT '',last_message_rowid INTEGER NOT NULL DEFAULT 0,updated_at TEXT DEFAULT CURRENT_TIMESTAMP)",
+        ),
+    )
+    # Pair only adjacent successful legacy incoming/outgoing rows; never guess failures.
+    for chat in c.execute("SELECT id,kind FROM chats").fetchall():
+        mode = "private" if chat["kind"] == "private" else "group_shared"
+        pid = c.execute(
+            "SELECT id FROM principals WHERE chat_id=? AND kind='private_user'",
+            (chat["id"],),
+        ).fetchone()
+        scope = c.execute(
+            "INSERT INTO conversation_scopes(chat_id,principal_id,mode) VALUES(?,?,?)",
+            (chat["id"], pid[0] if pid else None, mode),
+        ).lastrowid
+        rows = c.execute(
+            "SELECT rowid,* FROM messages WHERE chat_id=? ORDER BY created_at,rowid",
+            (chat["id"],),
+        ).fetchall()
+        pending = None
+        for row in rows:
+            c.execute("UPDATE messages SET scope_id=? WHERE id=?", (scope, row["id"]))
+            if row["role"] == "user" and row["status"] == "received":
+                pending = row["id"]
+            elif row["role"] == "assistant" and row["status"] == "sent" and pending:
+                c.execute(
+                    "UPDATE messages SET turn_id=? WHERE id IN (?,?)",
+                    (pending, pending, row["id"]),
+                )
+                pending = None
+            else:
+                pending = None

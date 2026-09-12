@@ -148,6 +148,9 @@ class Storage:
                  created_at, updated_at, error_message)
                 VALUES (?, ?, 'assistant', 'outgoing', ?, 'sent', NULL, ?, ?, NULL)""",
                 (assistant_id, chat_id, content, now, now))
+            connection.execute("UPDATE messages SET scope_id=(SELECT scope_id FROM messages WHERE id=?),sender_principal_id=(SELECT sender_principal_id FROM messages WHERE id=?),turn_id=? WHERE id=?", (incoming_id,incoming_id,incoming_id,assistant_id))
+            connection.execute("UPDATE messages SET turn_id=? WHERE id=?",(incoming_id,incoming_id))
+            connection.execute("UPDATE chats SET last_reply_at=? WHERE id=?",(now,chat_id))
         return assistant_id
 
     def recover_incomplete(self) -> int:
