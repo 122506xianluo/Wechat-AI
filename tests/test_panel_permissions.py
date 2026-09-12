@@ -365,3 +365,48 @@ def test_owner_initialization_page_offers_console_button():
     source = Path(panel.app.template_folder, "login.html").read_text(encoding="utf-8")
     assert "我已保存恢复码，进入控制台" in source
     assert "保存后刷新页面登录" not in source
+
+
+@pytest.mark.parametrize("initialized,action", [(False, "init"), (True, "login")])
+def test_rendered_login_script_executes_submit(initialized, action):
+    # Validate the rendered script, not the template source: HTML entities inside
+    # script raw text are not decoded by the browser and break JavaScript parsing.
+    import shutil
+    import subprocess
+    from flask import render_template
+
+    with panel.app.test_request_context("/"):
+        page = render_template(
+            "login.html", csrf_token="synthetic", initialized=initialized
+        )
+    script = page.split("<script>", 1)[1].split("</script>", 1)[0]
+    assert f'submit("{action}")' in script
+    assert "&#34;" not in script
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node unavailable for rendered JavaScript execution")
+    harness = r"""
+const elements = {};
+const document = {
+  querySelector(selector) {
+    return elements[selector] ||= {
+      value: 'synthetic', content: 'synthetic', hidden: false,
+      addEventListener() {}, appendChild() {}
+    };
+  },
+  createElement() { return {}; }
+};
+let called, prevented = false;
+const location = {};
+const fetch = async (url) => {
+  called = url;
+  return {ok: true, json: async () => ({ok: true})};
+};
+"""
+    harness += script
+    harness += "\ndocument.querySelector('#form').onsubmit({preventDefault(){prevented=true}});"
+    harness += f"\nif (!prevented || called !== '/api/v1/auth/{action}') throw Error('submit did not execute');"
+    result = subprocess.run(
+        [node, "-e", harness], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
