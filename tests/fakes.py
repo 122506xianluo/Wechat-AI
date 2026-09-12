@@ -28,7 +28,12 @@ class FakeDesktop:
     def is_foreground(self):
         return self.foreground
 
-    def send(self, message, answer):
+    def send(self, message, answer, *, before_fill=None):
+        from bot import SendUncertain
+        if self.error and not isinstance(self.error,SendUncertain):
+            raise self.error
+        if before_fill:
+            before_fill()
         if self.error:
             raise self.error
         self.sent.append((message, answer))

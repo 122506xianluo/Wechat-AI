@@ -199,4 +199,18 @@ def register_admin(app, get_storage, error):
             ]
         return jsonify(ok=True, items=rows)
 
+    from job_queue import JobQueue
+
+    @api.get("/api/v1/queue")
+    def queue_list():
+        return jsonify(ok=True, items=JobQueue(get_storage()).list())
+
+    @api.post("/api/v1/queue/<job_id>/<action>")
+    def queue_action(job_id, action):
+        data = payload()
+        result = JobQueue(get_storage()).action(
+            job_id, action, g.actor, data.get("confirm", False)
+        )
+        return jsonify(ok=True, id=result)
+
     app.register_blueprint(api)

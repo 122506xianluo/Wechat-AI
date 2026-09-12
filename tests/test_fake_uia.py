@@ -80,6 +80,7 @@ def test_after_input_exceptions_always_unknown(monkeypatch, failure):
             raise RuntimeError("synthetic setter failure")
     edit.set_text = insert
     desktop._edit = lambda: edit
+    desktop.rows = lambda: []
     def hotkey(*_):
         raise RuntimeError("synthetic send failure")
     monkeypatch.setitem(sys.modules, "pyautogui", SimpleNamespace(hotkey=hotkey))

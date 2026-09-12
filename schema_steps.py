@@ -133,3 +133,19 @@ def v7(c):
             "CREATE TABLE runtime_settings(key TEXT PRIMARY KEY,value TEXT NOT NULL,revision INTEGER NOT NULL DEFAULT 1,updated_at TEXT DEFAULT CURRENT_TIMESTAMP)",
         ),
     )
+
+
+def v8(c):
+    statements(
+        c,
+        (
+            "CREATE TABLE message_jobs(id TEXT PRIMARY KEY,inbound_message_id TEXT REFERENCES messages(id) ON DELETE CASCADE,scope_id INTEGER NOT NULL REFERENCES conversation_scopes(id),chat_id INTEGER NOT NULL REFERENCES chats(id),principal_id INTEGER REFERENCES principals(id),job_type TEXT NOT NULL DEFAULT 'reply',state TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,next_attempt_at REAL NOT NULL DEFAULT 0,lease_until REAL,lease_owner TEXT,generated_reply TEXT,last_error TEXT,entered_sending INTEGER NOT NULL DEFAULT 0,payload TEXT NOT NULL,created_at REAL NOT NULL,updated_at REAL NOT NULL)",
+            "CREATE INDEX job_ready ON message_jobs(state,next_attempt_at,created_at)",
+            "CREATE INDEX job_scope_order ON message_jobs(scope_id,created_at)",
+            "CREATE UNIQUE INDEX job_incoming_unique ON message_jobs(inbound_message_id) WHERE inbound_message_id IS NOT NULL",
+            "CREATE TABLE inbound_dedup(chat_id INTEGER NOT NULL REFERENCES chats(id),source_key TEXT NOT NULL,job_id TEXT NOT NULL,created_at REAL NOT NULL,PRIMARY KEY(chat_id,source_key))",
+            "CREATE TABLE job_attempts(id INTEGER PRIMARY KEY,job_id TEXT NOT NULL REFERENCES message_jobs(id) ON DELETE CASCADE,attempt INTEGER NOT NULL,status TEXT NOT NULL,error TEXT,created_at REAL NOT NULL)",
+            "CREATE TABLE job_leases(job_id TEXT PRIMARY KEY REFERENCES message_jobs(id) ON DELETE CASCADE,owner TEXT NOT NULL,expires_at REAL NOT NULL)",
+            "CREATE TABLE queue_fairness(chat_id INTEGER PRIMARY KEY REFERENCES chats(id),last_claim REAL NOT NULL)",
+        ),
+    )
