@@ -68,8 +68,8 @@ def _decision(connection, principal_id: int, chat_id: int | None) -> AccessDecis
     if principal["kind"] in ("private_user", "group_member") and principal["chat_id"] != chat_id:
         return AccessDecision(principal_id, chat_id, "blocked", False, "wrong_chat")
     if chat_id is not None:
-        chat = connection.execute("SELECT enabled FROM chats WHERE id=?", (chat_id,)).fetchone()
-        if chat is None or not chat[0]:
+        chat = connection.execute("SELECT enabled,approval FROM chats WHERE id=?", (chat_id,)).fetchone()
+        if chat is None or not chat[0] or chat["approval"] != "approved":
             return AccessDecision(principal_id, chat_id, "blocked", False, "chat_disabled")
     grants = connection.execute(
         "SELECT chat_id,access_level FROM access_grants "
@@ -139,8 +139,8 @@ class Permissions:
         # Do not create chats here: unknown targets are not authorized by identity.
         with self.storage._connection() as connection:
             chat = connection.execute(
-                "SELECT id,enabled FROM chats WHERE kind=? AND name=?", (kind, name)).fetchone()
-        if chat is None or not chat["enabled"]:
+                "SELECT id,enabled,approval FROM chats WHERE kind=? AND name=?", (kind, name)).fetchone()
+        if chat is None or not chat["enabled"] or chat["approval"] != "approved":
             return AccessDecision(None, None, "blocked", False, "chat_unregistered_or_disabled")
         chat_id = int(chat["id"])
         if kind == "group":

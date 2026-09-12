@@ -22,6 +22,7 @@ from commands import Commands, parse_command
 from permissions import Permissions
 from storage import Storage
 from roles import Roles
+from chats import Chats
 
 import httpx
 from dotenv import load_dotenv
@@ -66,10 +67,6 @@ class Config:
             if not isinstance(value, list) or any(
                     not isinstance(x, str) or not x.strip() or x != x.strip() for x in value):
                 raise ValueError(f"{key} 必须是无首尾空格的非空字符串列表")
-        if not self.private_chats and not self.groups:
-            raise ValueError("至少配置一个 private_chats 或 groups")
-        if set(self.private_chats) & set(self.groups):
-            raise ValueError("好友和群不能同名；请修改好友备注或群名")
         if self.group_mode not in ("mention", "prefix", "all"):
             raise ValueError("group_mode 必须是 mention/prefix/all")
         if self.groups and self.group_mode == "mention" and not self.bot_names:
@@ -150,11 +147,13 @@ class Message:
 class Session:
     key: str
     name: str
+    occurrence: int = 0
 
 
 class Policy:
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, chats=None):
         self.cfg = cfg
+        self.chats = chats
 
     def expected_kind(self, name: str) -> str | None:
         if name in self.cfg.private_chats:
@@ -164,7 +163,10 @@ class Policy:
         return None
 
     def prompt(self, message: Message) -> str | None:
-        if self.expected_kind(message.chat) != message.kind:
+        if self.chats is not None:
+            if not self.chats.allowed(message.kind, message.chat):
+                return None
+        elif message.chat not in (self.cfg.private_chats if message.kind == "private" else self.cfg.groups):
             return None
         text = message.text.strip()
         if not text or len(text) > self.cfg.max_input_chars:
@@ -455,15 +457,14 @@ class WeChatDesktop:
 
     def sessions(self) -> list[Session]:
         items = self.window.child_window(**self.Main.SessionList).children(control_type="ListItem")
-        result, seen = [], set()
+        result, counts = [], {}
         for item in items:
             key = item.automation_id()
-            if not key.startswith("session_item_") or key in seen:
+            if not key.startswith("session_item_"):
                 continue
-            seen.add(key)
-            name = key.removeprefix("session_item_")
-            if self.policy.expected_kind(name):
-                result.append(Session(key, name))
+            index = counts.get(key, 0)
+            counts[key] = index + 1
+            result.append(Session(key, key.removeprefix("session_item_"), index))
         return result
 
     def current(self) -> tuple[str, str]:
@@ -492,23 +493,16 @@ class WeChatDesktop:
             raise BotError("检测到输入框草稿；不会覆盖人工输入")
         items = self.window.child_window(**self.Main.SessionList).children(control_type="ListItem")
         matches = [item for item in items if item.automation_id() == session.key]
-        if len(matches) != 1:
+        if len(matches) <= session.occurrence:
             raise BotError("目标会话不在当前可见会话列表中")
-        try:
-            selected, _ = self.current()
-        except BotError:
-            selected = None
-        if selected != session.name:
-            matches[0].click_input()
-            time.sleep(.25)
+        # Always click the actual list item, not a name-only shortcut.
+        matches[session.occurrence].click_input()
+        time.sleep(.25)
         deadline = time.monotonic() + 1.5
         while True:
             self.require_foreground()
             name, kind = self.current()
             if name == session.name:
-                expected = self.policy.expected_kind(name)
-                if kind != expected:
-                    raise BotError("会话类型与配置不一致")
                 return kind
             if time.monotonic() >= deadline:
                 raise BotError("切换聊天后标题核验失败")
@@ -524,38 +518,37 @@ class WeChatDesktop:
         return set(self.cfg.private_chats) | set(self.cfg.groups)
 
     def warmup(self):
-        """Baseline every configured visible target; no historical replies."""
         self.require_foreground()
-        sessions = self.sessions()
-        visible = {item.name for item in sessions}
-        missing = self._configured_names() - visible
-        if missing:
-            raise BotError("有配置目标不在左侧可见会话列表；请先打开或置顶全部目标")
-        fresh = SnapshotTracker()
-        for session in sessions:
-            self.activate(session)
-            rows = self.rows()
-            fresh.update(session.key, [row_token(r.class_name(), r.window_text()) for r in rows])
-        self.tracker = fresh
-        self.known = {item.key for item in sessions}
+        self.tracker = SnapshotTracker()
+        self.approval_baselines = {}
         self.ready = True
+        self.poll()  # First snapshot always establishes a baseline.
 
     def poll(self) -> list[Message]:
-        """Visit every configured target every pass; no unread-count dependency."""
         if not self.ready:
             raise BotError("尚未建立消息基线")
         self.require_foreground()
-        sessions = self.sessions()
-        visible = {item.name for item in sessions}
-        missing = self._configured_names() - visible
-        if missing:
-            raise BotError("配置目标从可见会话列表消失；已停止")
-        messages = []
-        for session in sessions:
-            kind = self.activate(session)
+        messages, seen = [], []
+        for session in self.sessions():
+            try:
+                kind = self.activate(session)
+            except FocusLost:
+                raise
+            except BotError:
+                log.info("chat_skipped reason=not_visible_or_unverified")
+                continue
+            seen.append((kind, session.name))
+            chat = self.chats.discover(kind, session.name, session.key)
+            key = str(chat['id']) + ':' + str(session.occurrence)
             rows = self.rows()
-            indices = self.tracker.update(
-                session.key, [row_token(r.class_name(), r.window_text()) for r in rows])
+            tokens = [row_token(r.class_name(), r.window_text()) for r in rows]
+            revision = chat['baseline_revision']
+            if self.approval_baselines.get(key) != revision:
+                self.tracker.snapshots.pop(key, None)
+                self.approval_baselines[key] = revision
+            indices = self.tracker.update(key, tokens)
+            if not self.chats.allowed(kind, session.name):
+                continue
             for index in indices:
                 row = rows[index]
                 if row.class_name() != "mmui::ChatTextItemView":
@@ -579,14 +572,16 @@ class WeChatDesktop:
                     uuid.uuid4().hex, session.name, kind, text, source_key=source_key,
                     sender_name=sender, direction=direction, direction_verified=verified)
                 messages.append(candidate)
+        self.chats.set_visibility(seen)
         return messages
 
     def send(self, message: Message, answer: str):
         self.require_foreground()
         matches = [item for item in self.sessions() if item.name == message.chat]
-        if len(matches) != 1:
-            raise BotError("发送目标不可见或不唯一")
-        kind = self.activate(matches[0])
+        verified_matches = [item for item in matches if self.activate(item) == message.kind]
+        if len(verified_matches) != 1:
+            raise BotError("发送目标不可见或同类型同名，不允许猜测")
+        kind = self.activate(verified_matches[0])
         if kind != message.kind or self.current() != (message.chat, message.kind):
             raise BotError("发送前目标核验失败")
         edit = self._edit()
@@ -668,13 +663,14 @@ class Bot:
                  desktop=None, llm=None, storage=None):
         self.root, self.cfg = root, cfg
         self.storage = storage if storage is not None else Storage(root)
-        self.storage.register_targets(cfg.private_chats, cfg.groups)
+        self.chats = Chats(self.storage)
+        self.chats.import_legacy(cfg.private_chats, cfg.groups)
         self.permissions = Permissions(self.storage)
-        self.permissions.register_private_targets(cfg.private_chats)
         self.commands = Commands(self.permissions)
         self.roles = Roles(self.storage)
-        self.policy = Policy(cfg)
+        self.policy = Policy(cfg, self.chats)
         self.desktop = desktop if desktop is not None else WeChatDesktop(cfg)
+        self.desktop.chats = self.chats
         self.llm = llm if llm is not None else ChatLLM(settings, cfg)
         recovered = self.storage.recover_incomplete()
         if recovered:
@@ -687,7 +683,7 @@ class Bot:
         A decision is re-read before sending so blocking during a model call takes
         effect without restarting the bot. Commands never enter model history.
         """
-        if self.stopped() or self.policy.expected_kind(message.chat) != message.kind:
+        if self.stopped() or not self.chats.allowed(message.kind, message.chat):
             return True
         decision = self.permissions.resolve_incoming(
             message.kind, message.chat, message.sender_name, message.direction)

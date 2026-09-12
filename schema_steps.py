@@ -42,3 +42,22 @@ def v3(c):
         "INSERT INTO roles(name,system_prompt,is_default) VALUES('默认助手',?,1)",
         (prompt,),
     )
+
+
+def v4(c):
+    statements(
+        c,
+        (
+            "ALTER TABLE chats ADD COLUMN approval TEXT NOT NULL DEFAULT 'pending'",
+            "ALTER TABLE chats ADD COLUMN visibility TEXT NOT NULL DEFAULT 'unknown'",
+            "ALTER TABLE chats ADD COLUMN management_note TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE chats ADD COLUMN baseline_revision INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE chats ADD COLUMN last_message_at TEXT",
+            "ALTER TABLE chats ADD COLUMN last_reply_at TEXT",
+            "ALTER TABLE chats ADD COLUMN merged_into INTEGER REFERENCES chats(id)",
+            "UPDATE chats SET approval='approved'",
+            "CREATE TABLE chat_aliases(id INTEGER PRIMARY KEY,chat_id INTEGER NOT NULL REFERENCES chats(id),kind TEXT NOT NULL,name TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(kind,name,chat_id))",
+            "CREATE TABLE chat_discoveries(id INTEGER PRIMARY KEY,chat_id INTEGER NOT NULL REFERENCES chats(id),ui_key_hash TEXT NOT NULL,first_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,last_seen_at TEXT DEFAULT CURRENT_TIMESTAMP,UNIQUE(chat_id,ui_key_hash))",
+            "CREATE TABLE user_profiles(principal_id INTEGER PRIMARY KEY REFERENCES principals(id),note TEXT NOT NULL DEFAULT '',updated_at TEXT DEFAULT CURRENT_TIMESTAMP)",
+        ),
+    )

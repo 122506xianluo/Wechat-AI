@@ -73,10 +73,8 @@ class Storage:
             return int(row[0])
 
     def register_targets(self, private_chats: list[str], groups: list[str]) -> None:
-        for name in private_chats:
-            self.ensure_chat("private", name)
-        for name in groups:
-            self.ensure_chat("group", name)
+        from chats import Chats
+        Chats(self).import_legacy(private_chats, groups)
 
     def chat_id(self, kind: str, name: str) -> int:
         with self._connection() as connection:

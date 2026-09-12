@@ -60,4 +60,27 @@ def register_admin(app, get_storage, error):
         )
         return jsonify(ok=True)
 
+    from chats import Chats
+
+    @api.get("/api/v1/chats")
+    def chats_list():
+        return jsonify(
+            ok=True, items=Chats(get_storage()).list(request.args.get("q", ""))
+        )
+
+    @api.post("/api/v1/chats/<int:chat_id>")
+    def chat_update(chat_id):
+        Chats(get_storage()).update(chat_id, payload(), g.actor)
+        return jsonify(ok=True)
+
+    @api.post("/api/v1/chats/<int:chat_id>/merge")
+    def chat_merge(chat_id):
+        if app.bot_is_running():
+            raise ValueError("请先停止机器人再合并身份")
+        data = payload()
+        if data.get("confirm") is not True:
+            raise ValueError("需要明确确认合并")
+        Chats(get_storage()).merge(chat_id, int(data["target"]), g.actor)
+        return jsonify(ok=True)
+
     app.register_blueprint(api)

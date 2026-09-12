@@ -63,7 +63,6 @@ def get_storage() -> Storage:
                 raw = json.loads(CONFIG_FILE.read_text(encoding="utf-8-sig"))
                 cfg = config_from_payload(raw)
                 candidate.register_targets(cfg.private_chats, cfg.groups)
-                Permissions(candidate).register_private_targets(cfg.private_chats)
             _storage = candidate
             _storage_error = None
         except Exception as exc:
@@ -613,6 +612,7 @@ def dump_error(exc=None):
         pass
 
 
+app.bot_is_running = bot_running
 register_admin(app, get_storage, management_error)
 
 

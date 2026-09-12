@@ -42,7 +42,7 @@ def test_snapshot_rebaseline_not_replay():
 
 @pytest.mark.parametrize("control,accepted", [(FakeControl("/ai reset"), False),
                                              (row(side="right"), False), (row(), True)])
-def test_poll_does_not_accept_unknown_by_group_trigger(control, accepted):
+def test_poll_does_not_accept_unknown_by_group_trigger(control, accepted, tmp_path):
     desktop = WeChatDesktop.__new__(WeChatDesktop)
     desktop.cfg = Config(groups=["Test Group"], bot_names=["Bot"], group_mode="prefix")
     desktop.policy, desktop.scale, desktop.ready = Policy(desktop.cfg), 1.0, True
@@ -52,7 +52,13 @@ def test_poll_does_not_accept_unknown_by_group_trigger(control, accepted):
     desktop.activate = lambda *_: "group"
     seed = FakeControl("baseline")
     desktop.rows = lambda: [seed, control]
-    desktop.tracker.update("key", [row_token(seed.class_name(), seed.window_text())])
+    from storage import Storage
+    from chats import Chats
+    desktop.chats = Chats(Storage(tmp_path))
+    desktop.chats.import_legacy([], ["Test Group"])
+    key = str(desktop.chats.get("group", "Test Group")["id"]) + ":0"
+    desktop.approval_baselines = {key: 0}
+    desktop.tracker.update(key, [row_token(seed.class_name(), seed.window_text())])
     events = desktop.poll()
     assert bool(events) == accepted
     if accepted:
