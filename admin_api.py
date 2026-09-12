@@ -246,4 +246,98 @@ def register_admin(app, get_storage, error):
             ),
         )
 
+    from knowledge import Knowledge
+    from safe_tools import Tools
+
+    @api.get("/api/v1/knowledge-bases")
+    def knowledge_list():
+        return jsonify(ok=True, items=Knowledge(get_storage()).list())
+
+    @api.post("/api/v1/knowledge-bases")
+    def knowledge_create():
+        data = payload()
+        return jsonify(
+            ok=True,
+            id=Knowledge(get_storage()).create(
+                data.get("name"), data.get("description", ""), g.actor
+            ),
+        )
+
+    @api.get("/api/v1/knowledge-bases/<int:kid>/documents")
+    def knowledge_documents(kid):
+        return jsonify(ok=True, items=Knowledge(get_storage()).documents(kid))
+
+    @api.post("/api/v1/knowledge-bases/<int:kid>/documents")
+    def knowledge_upload(kid):
+        import base64
+
+        data = payload()
+        try:
+            raw = base64.b64decode(data["content"], validate=True)
+        except Exception as exc:
+            raise ValueError("上传文件编码无效") from exc
+        return jsonify(
+            ok=True,
+            id=Knowledge(get_storage()).import_document(
+                kid, data.get("name", "document"), raw, g.actor
+            ),
+        )
+
+    @api.post("/api/v1/knowledge-bases/<int:kid>/promote")
+    def knowledge_promote(kid):
+        data = payload()
+        if data.get("confirm") is not True:
+            raise ValueError("请确认将附件长期保存在知识库中")
+        return jsonify(
+            ok=True,
+            id=Knowledge(get_storage()).promote(kid, data["attachment_id"], g.actor),
+        )
+
+    @api.get("/api/v1/knowledge-bases/<int:kid>/bindings")
+    def knowledge_bindings(kid):
+        return jsonify(ok=True, items=Knowledge(get_storage()).bindings(kid))
+
+    @api.post("/api/v1/knowledge-bases/<int:kid>/bindings")
+    def knowledge_bind(kid):
+        Knowledge(get_storage()).bind(kid, payload(), g.actor)
+        return jsonify(ok=True)
+
+    @api.post("/api/v1/knowledge-bases/<int:kid>/bindings/<int:bid>/delete")
+    def knowledge_unbind(kid, bid):
+        Knowledge(get_storage()).unbind(kid, bid, g.actor)
+        return jsonify(ok=True)
+
+    @api.post("/api/v1/knowledge-bases/<int:kid>/delete")
+    @api.post("/api/v1/knowledge-bases/<int:kid>/documents/<int:did>/delete")
+    def knowledge_delete(kid, did=None):
+        Knowledge(get_storage()).delete(
+            kid, g.actor, payload().get("confirm", False), document_id=did
+        )
+        return jsonify(ok=True)
+
+    @api.post("/api/v1/knowledge-documents/<int:did>/reindex")
+    def knowledge_reindex(did):
+        Knowledge(get_storage()).reindex(did, g.actor)
+        return jsonify(ok=True)
+
+    @api.get("/api/v1/tools")
+    def tools_list():
+        return jsonify(
+            ok=True, items=Tools(get_storage(), Knowledge(get_storage())).list()
+        )
+
+    @api.post("/api/v1/tools/<name>")
+    def tool_configure(name):
+        data = payload()
+        Tools(get_storage(), Knowledge(get_storage())).configure(
+            data["role_id"], name, data["enabled"], g.actor
+        )
+        return jsonify(ok=True)
+
+    @api.get("/api/v1/tools/runs")
+    def tools_runs():
+        return jsonify(
+            ok=True, items=Tools(get_storage(), Knowledge(get_storage())).runs()
+        )
+
     app.register_blueprint(api)

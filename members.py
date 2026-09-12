@@ -141,6 +141,9 @@ class Members:
                 or b["status"] == "ambiguous"
             ):
                 raise ValueError("仅允许同群内无重名冲突的成员合并")
+            from identity_merge import move_history
+
+            move_history(c, a["chat_id"], b["chat_id"], source, target)
             c.execute(
                 "INSERT OR IGNORE INTO principal_aliases(chat_id,principal_id,name,normalized_name) SELECT chat_id,?,name,normalized_name FROM principal_aliases WHERE principal_id=?",
                 (target, source),

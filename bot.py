@@ -637,7 +637,7 @@ class ChatLLM:
     def close(self):
         self.client.close()
 
-    def reply(self, question: str, history: list[dict], *, role=None, images=None) -> str:
+    def reply(self, question: str, history: list[dict], *, role=None, images=None, tools=None, execute_tool=None) -> str:
         role = role or {}
         payload = {
             "model": role.get("model") or self.settings.model,
@@ -646,19 +646,41 @@ class ChatLLM:
             "max_tokens": role.get("max_tokens", self.cfg.max_tokens),
             "temperature": role.get("temperature", 0.7),
         }
+        if tools:
+            payload["tools"] = tools
+            payload["parallel_tool_calls"] = False
         headers = {"Content-Type": "application/json"}
         if self.settings.api_key:
             headers["Authorization"] = "Bearer " + self.settings.api_key
-        try:
-            response = self.client.post(self.settings.endpoint, headers=headers, json=payload)
-            response.raise_for_status()
-            data = response.json()
-            answer = data["choices"][0]["message"]["content"].strip()
-        except Exception as exc:
-            raise BotError(f"LLM 请求失败：{type(exc).__name__}") from exc
-        if not answer:
-            raise BotError("模型返回空回答")
-        return answer[:role.get("max_reply_chars", self.cfg.max_reply_chars)]
+        total = 0
+        # Max four native calls. A final model request may only produce text.
+        for _ in range(5):
+            try:
+                response = self.client.post(self.settings.endpoint, headers=headers, json=payload)
+                response.raise_for_status()
+                msg = response.json()["choices"][0]["message"]
+                calls = msg.get("tool_calls") or []
+                if not calls:
+                    answer = msg.get("content")
+                    if not isinstance(answer, str) or not answer.strip():
+                        raise ValueError("模型返回空回答")
+                    return answer.strip()[:role.get("max_reply_chars", self.cfg.max_reply_chars)]
+                if not tools or not execute_tool or len(calls)+total > 4:
+                    raise ValueError("模型工具调用超出本轮限制或未启用")
+                allowed = {t["function"]["name"] for t in tools}
+                payload["messages"].append({"role":"assistant","content":msg.get("content"),"tool_calls":calls})
+                for call in calls:
+                    function = call.get("function", {})
+                    if call.get("type")!="function" or function.get("name") not in allowed or not isinstance(call.get("id"),str):
+                        raise ValueError("模型请求未授权工具")
+                    result = execute_tool(function["name"], function.get("arguments", ""))
+                    payload["messages"].append({"role":"tool","tool_call_id":call["id"],"content":result})
+                    total += 1
+                if total >= 4:
+                    payload["tool_choice"] = "none"
+            except Exception as exc:
+                raise BotError(f"LLM 请求失败：{type(exc).__name__}") from exc
+        raise BotError("模型没有在工具调用上限内返回文本")
 
 
 class InstanceLock:
@@ -700,6 +722,10 @@ class Bot:
         from media import Media
         self.media = Media(self.storage, settings)
         self.media.cleanup()
+        from knowledge import Knowledge
+        from safe_tools import Tools as SafeTools
+        self.knowledge = Knowledge(self.storage, settings)
+        self.tools = SafeTools(self.storage, self.knowledge)
         self.engine = Engine(self)
 
     def process_message(self, message: Message) -> bool:

@@ -162,3 +162,23 @@ def v9(c):
             "CREATE TABLE attachment_extractions(attachment_id TEXT PRIMARY KEY REFERENCES attachments(id) ON DELETE CASCADE,method TEXT NOT NULL,content TEXT NOT NULL DEFAULT '',status TEXT NOT NULL,updated_at REAL NOT NULL)",
         ),
     )
+
+
+def v10(c):
+    statements(
+        c,
+        (
+            "CREATE TABLE knowledge_bases(id INTEGER PRIMARY KEY,name TEXT UNIQUE NOT NULL,description TEXT NOT NULL DEFAULT '',enabled INTEGER NOT NULL DEFAULT 1,revision INTEGER NOT NULL DEFAULT 1,created_at TEXT DEFAULT CURRENT_TIMESTAMP)",
+            "CREATE TABLE knowledge_documents(id INTEGER PRIMARY KEY,kb_id INTEGER NOT NULL REFERENCES knowledge_bases(id) ON DELETE CASCADE,name TEXT NOT NULL,version INTEGER NOT NULL,sha256 TEXT NOT NULL,relative_path TEXT NOT NULL,size_bytes INTEGER NOT NULL,active INTEGER NOT NULL DEFAULT 1,status TEXT NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP,UNIQUE(kb_id,name,version))",
+            "CREATE INDEX knowledge_dedup ON knowledge_documents(kb_id,sha256)",
+            "CREATE TABLE knowledge_chunks(id INTEGER PRIMARY KEY,document_id INTEGER NOT NULL REFERENCES knowledge_documents(id) ON DELETE CASCADE,ordinal INTEGER NOT NULL,page INTEGER,paragraph INTEGER,content TEXT NOT NULL,UNIQUE(document_id,ordinal))",
+            "CREATE VIRTUAL TABLE knowledge_fts USING fts5(content,tokenize='unicode61')",
+            "CREATE TRIGGER knowledge_chunk_delete AFTER DELETE ON knowledge_chunks BEGIN DELETE FROM knowledge_fts WHERE rowid=OLD.id; END",
+            "CREATE TABLE knowledge_embeddings(chunk_id INTEGER PRIMARY KEY REFERENCES knowledge_chunks(id) ON DELETE CASCADE,model_fingerprint TEXT NOT NULL,dimensions INTEGER NOT NULL,vector BLOB NOT NULL)",
+            "CREATE TABLE knowledge_bindings(id INTEGER PRIMARY KEY,kb_id INTEGER NOT NULL REFERENCES knowledge_bases(id) ON DELETE CASCADE,role_id INTEGER REFERENCES roles(id) ON DELETE CASCADE,chat_id INTEGER REFERENCES chats(id) ON DELETE CASCADE,principal_id INTEGER REFERENCES principals(id) ON DELETE CASCADE,CHECK(role_id IS NOT NULL OR chat_id IS NOT NULL OR principal_id IS NOT NULL))",
+            "CREATE UNIQUE INDEX knowledge_binding_identity ON knowledge_bindings(kb_id,COALESCE(role_id,0),COALESCE(chat_id,0),COALESCE(principal_id,0))",
+            "CREATE TABLE knowledge_index_jobs(document_id INTEGER PRIMARY KEY REFERENCES knowledge_documents(id) ON DELETE CASCADE,state TEXT NOT NULL DEFAULT 'queued',attempts INTEGER NOT NULL DEFAULT 0,next_attempt_at REAL NOT NULL DEFAULT 0,lease_until REAL,lease_owner TEXT,last_error TEXT,updated_at REAL NOT NULL)",
+            "CREATE TABLE role_tools(role_id INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE,tool_name TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,PRIMARY KEY(role_id,tool_name))",
+            "CREATE TABLE tool_runs(id INTEGER PRIMARY KEY,job_id TEXT REFERENCES message_jobs(id) ON DELETE SET NULL,principal_id INTEGER REFERENCES principals(id),scope_id INTEGER REFERENCES conversation_scopes(id),tool_name TEXT NOT NULL,argument_summary TEXT NOT NULL,status TEXT NOT NULL,duration_ms INTEGER NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP)",
+        ),
+    )

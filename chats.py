@@ -149,6 +149,15 @@ class Chats:
                 or b["merged_into"]
             ):
                 raise ValueError("只能合并两个未合并的私聊")
+            from identity_merge import move_history
+
+            source_pid = Permissions._observe(
+                c, "private_user", source, a["name"], status="active"
+            )
+            target_pid = Permissions._observe(
+                c, "private_user", target, b["name"], status="active"
+            )
+            move_history(c, source, target, source_pid, target_pid)
             # Permissions are intentionally NOT inherited from the retired name.
             c.execute("UPDATE messages SET chat_id=? WHERE chat_id=?", (target, source))
             c.execute(

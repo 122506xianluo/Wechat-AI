@@ -11,9 +11,9 @@ import time
 from typing import Callable, Iterator
 import uuid
 
-from schema_steps import v3, v4, v5, v6, v7, v8, v9
+from schema_steps import v3, v4, v5, v6, v7, v8, v9, v10
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 
 class MigrationLock:
@@ -171,7 +171,7 @@ def _v2(connection: sqlite3.Connection) -> None:
     connection.execute("INSERT INTO schema_meta(key,value) VALUES('permission_revision','0')")
 
 
-MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {1: _v1, 2: _v2, 3: v3, 4: v4, 5: v5, 6: v6, 7: v7, 8: v8, 9: v9}
+MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {1: _v1, 2: _v2, 3: v3, 4: v4, 5: v5, 6: v6, 7: v7, 8: v8, 9: v9, 10: v10}
 
 
 def migrate(path: Path, *, target_version: int = SCHEMA_VERSION,
