@@ -1,485 +1,85 @@
+{% from '_icons.html' import icon %}
+{% macro nav(key, label, glyph, section='') -%}
+<a class="nav-item" href="#{{ key }}" data-view="{{ key }}" title="{{ label }}">{{ icon(glyph) }}<span class="nav-label">{{ label }}</span>{% if section %}<span class="nav-meta">{{ section }}</span>{% endif %}</a>
+{%- endmacro %}
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-  <meta charset="UTF-8">
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="csrf-token" content="{{ csrf_token }}">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>WeChat AI 控制台</title>
-  <style>
-    :root {
-      --bg: #f3f5f7;
-      --card: #fff;
-      --text: #1f2328;
-      --muted: #667085;
-      --line: #e6e8eb;
-      --green: #07c160;
-      --green-dark: #06ad56;
-      --danger: #e54545;
-      --blue: #2b6de5;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      font: 15px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif;
-      color: var(--text);
-      background: var(--bg);
-    }
-    .wrap { max-width: 920px; margin: 0 auto; padding: 24px 16px 48px; }
-    header {
-      display: flex; justify-content: space-between; align-items: flex-start;
-      gap: 16px; margin-bottom: 16px;
-    }
-    h1 { margin: 0; font-size: 22px; }
-    .sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
-    .status {
-      display: flex; align-items: center; gap: 8px;
-      background: var(--card); border: 1px solid var(--line);
-      border-radius: 999px; padding: 8px 14px; font-size: 13px;
-      white-space: nowrap;
-    }
-    .dot { width: 8px; height: 8px; border-radius: 50%; background: #c5c9ce; }
-    .on .dot { background: var(--green); box-shadow: 0 0 0 4px rgba(7,193,96,.16); }
-    .card {
-      background: var(--card); border: 1px solid var(--line);
-      border-radius: 14px; padding: 18px; margin-bottom: 14px;
-    }
-    h2 { margin: 0 0 12px; font-size: 16px; }
-    label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 6px; }
-    input[type=text], input[type=password], input[type=number], textarea, select {
-      width: 100%; border: 1px solid var(--line); border-radius: 10px;
-      padding: 9px 11px; font: inherit; background: #fff;
-    }
-    textarea { min-height: 88px; resize: vertical; }
-    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-    .actions { display: flex; flex-wrap: wrap; gap: 8px; }
-    button {
-      border: 0; border-radius: 10px; padding: 9px 14px; font: inherit;
-      cursor: pointer; background: #eef1f4; color: var(--text);
-    }
-    button.primary { background: var(--green); color: #fff; }
-    button.primary:hover { background: var(--green-dark); }
-    button.danger { background: var(--danger); color: #fff; }
-    button.ghost { background: #e8eefc; color: var(--blue); }
-    button:disabled { opacity: .5; cursor: not-allowed; }
-    .hint { color: var(--muted); font-size: 12px; margin-top: 6px; }
-    .toast {
-      display: none; margin: 0 0 14px; padding: 10px 12px;
-      border-radius: 10px; font-size: 14px;
-    }
-    .toast.show { display: block; }
-    .toast.ok { background: #e9f8ef; color: #0d7a3e; }
-    .toast.err { background: #fdecec; color: #b42318; }
-    .modes { display: flex; gap: 14px; flex-wrap: wrap; margin: 8px 0 4px; }
-    .modes label { margin: 0; color: var(--text); }
-    details { margin-top: 8px; }
-    pre {
-      margin: 0; max-height: 280px; overflow: auto; background: #0f1720;
-      color: #d7e0ea; border-radius: 10px; padding: 12px; font-size: 12px;
-      white-space: pre-wrap; word-break: break-word;
-    }
-    .keyhint { font-size: 12px; color: var(--muted); margin-top: 4px; }
-    @media (max-width: 720px) {
-      .row, header { display: block; }
-      .status { margin-top: 10px; width: fit-content; }
-    }
-  </style>
+  <meta name="color-scheme" content="light">
+  <title>WeChat AI · 工作台</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='manage.css') }}">
+  <script defer src="{{ url_for('static', filename='manage.js') }}"></script>
+  <script defer src="{{ url_for('static', filename='console.js') }}"></script>
 </head>
-<body>
-<a href="/manage" style="display:block;text-align:center;padding:10px">角色及扩展管理 →</a>
-  <div class="wrap">
-    <header>
-      <div>
-        <h1>WeChat AI 控制台</h1>
-        <div class="sub">本机页面，用来改配置、测试模型和启停自动回复。只监听本机。浏览器打不开时，看弹出的黑色窗口里的地址。</div>
-      </div>
-      <div id="badge" class="status"><span class="dot"></span><span id="badgeText">读取中</span></div>
-    </header>
-    <div id="toast" class="toast"></div>
-    <section class="card">
-      <h2>控制</h2>
-      <div class="actions">
-        <button class="primary" id="btnStart" onclick="startBot()">保存并启动</button>
-        <button class="danger" id="btnStop" onclick="stopBot()">停止</button>
-        <button onclick="saveCfg()">只保存</button>
-        <button class="ghost" onclick="testLlm()">测试模型</button>
-      </div>
-      <div class="hint">启动会真实回复。微信必须在这台 Windows 里保持可见前台；会话名必须和左侧列表完全一致。</div>
-    </section>
-    <section class="card">
-      <h2>模型</h2>
-      <label>接口地址 LLM_BASE_URL</label>
-      <input id="llm_base_url" type="text" placeholder="https://api.example.com/v1">
-      <label>API Key（留空表示不改已保存的密钥）</label>
-      <input id="llm_api_key" type="password" placeholder="sk-...">
-      <div class="keyhint" id="keyhint"></div>
-      <label>模型名</label>
-      <input id="llm_model" type="text" placeholder="your-model-name">
-    </section>
-    <section class="card">
-      <h2>回复对象</h2>
-      <div class="hint">聊天名单已由 SQLite 管理。请进入 <a href="/manage">管理后台 → 聊天/私聊用户</a> 批准或停用聊天；下方旧名单仅展示首次导入记录，修改配置不会重新导入。</div>
-      <div class="row">
-        <div>
-          <label>旧版私聊名单（只读）</label>
-          <textarea id="private_chats" readonly></textarea>
+<body class="workbench" data-access="{{ g.actor.access_level if g.actor is defined else 'user' }}">
+<a class="skip-link" href="#workspace">跳到主要内容</a>
+<div class="ambient ambient-one" aria-hidden="true"></div><div class="ambient ambient-two" aria-hidden="true"></div>
+<div class="ide" id="ide">
+  <header class="topbar">
+    <a href="#overview" class="brand" aria-label="WeChat AI 工作台"> <span class="brand-mark">{{ icon('chat') }}</span><span>WeChat <strong>AI</strong><small>WORKSPACE</small></span></a>
+    <div class="topbar-path"><span class="path-root">workspace</span>{{ icon('chevron') }}<span id="topPath">overview</span></div>
+    <div class="topbar-tools"><span class="local-chip">{{ icon('lock') }}<span>仅本机访问</span></span><span class="top-divider"></span><button class="icon-button" id="toggleNav" type="button" title="折叠导航栏 (Ctrl+B)" aria-label="折叠导航栏" aria-controls="sidebar" aria-expanded="true">{{ icon('left') }}</button><button class="icon-button" id="toggleLogs" type="button" title="折叠日志栏 (Ctrl+J)" aria-label="折叠日志栏" aria-controls="logPanel" aria-expanded="true">{{ icon('right') }}</button><span class="avatar" title="当前后台账户" id="accountAvatar">W</span></div>
+  </header>
+  <button class="drawer-backdrop" id="drawerBackdrop" aria-label="关闭侧边栏" hidden></button>
+  <aside id="sidebar" class="sidebar" aria-label="主要导航">
+    <div class="workspace-selector"><span class="workspace-icon">W</span><div class="sidebar-copy"><strong>微信 AI 助手</strong><span>Local workspace</span></div><span class="tiny-dot"></span></div>
+    <div class="nav-scroll"><nav id="nav">
+      <p class="nav-heading">工作空间</p>
+      {{ nav('overview', '运行总览', 'grid') }}{{ nav('chats', '聊天与用户', 'chat') }}{{ nav('members', '群成员', 'users') }}{{ nav('queue', '任务队列', 'queue') }}
+      <p class="nav-heading">AI 配置</p>
+      {{ nav('model', '模型连接', 'spark') }}{{ nav('roles', '角色与提示词', 'file') }}{{ nav('reply', '回复规则', 'sliders') }}{{ nav('contexts', '会话上下文', 'history') }}{{ nav('knowledge', '知识库', 'book') }}{{ nav('tools', '只读工具', 'tool') }}{{ nav('attachments', '附件管理', 'file') }}
+      <p class="nav-heading">系统管理</p>
+      {{ nav('permissions', '身份与权限', 'shield') }}{{ nav('runtime', '运行参数', 'sliders') }}{{ nav('storage', '数据持久化', 'database') }}{{ nav('capabilities', '模型能力', 'pulse') }}{{ nav('diagnostics', '身份诊断', 'search') }}{{ nav('account', '账户与备份', 'lock') }}
+    </nav></div>
+    <div class="sidebar-bottom"><span class="connection-dot" id="sideConnection"></span><div class="sidebar-copy"><strong id="sideState">连接控制台…</strong><span id="sideRole">本机管理会话</span></div><span class="mono nav-meta">LOCAL</span></div>
+  </aside>
+  <main class="workspace" id="workspace" tabindex="-1">
+    <div class="editor-tabs"><div class="editor-tab">{{ icon('sliders') }}<span id="editorTab">overview</span><span class="tab-dot" id="dirtyDot" hidden></span></div><span class="editor-meta">WECHAT AI / CONSOLE</span></div>
+    <div class="workspace-scroll" id="workspaceScroll">
+      <header class="page-header"><div><div class="eyebrow" id="pageEyebrow">WORKSPACE / OVERVIEW</div><h1 id="pageTitle">运行总览</h1><p id="pageDescription">你的 AI 工作空间，一切尽在掌握。</p></div><button class="icon-button outlined" type="button" id="refresh" title="刷新当前页" aria-label="刷新当前页">{{ icon('refresh') }}</button></header>
+      <div id="toast" class="toast" role="status" hidden></div><div id="notice" class="notice" role="status" hidden></div>
+      <div class="save-notice" id="saveNotice" hidden>{{ icon('save') }}<span id="saveMessage">有未保存的配置</span><button type="button" data-action="saveCfg" data-owner>保存更改</button></div>
+      <div class="pane" data-pane="overview">
+        <section class="hero-card">
+          <div class="hero-copy"><div class="hero-kicker"><span class="tiny-dot"></span>YOUR PERSONAL AI ASSISTANT</div><h2>让对话，持续发生。</h2><p>连接微信与大语言模型。<br>在这里管理回复、角色和每一段会话。</p><div class="actions hero-actions"><button class="primary" id="btnStart" type="button" data-action="startBot" disabled>{{ icon('play') }}保存并启动</button><button class="quiet danger-text" id="btnStop" type="button" data-action="stopBot" disabled>{{ icon('stop') }}停止机器人</button></div><span class="hero-footnote">启动后将真实回复已批准的聊天</span></div>
+          <div class="hero-art" aria-hidden="true"><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="glass-tile tile-back">{{ icon('spark') }}</div><div class="glass-tile tile-front">{{ icon('chat') }}<span class="tile-dots"><i></i><i></i><i></i></span></div><div class="art-spark s1">+</div><div class="art-spark s2">+</div><span class="orbit-dot"></span></div>
+        </section>
+        <div class="stat-grid">
+          <article class="stat-card"><div class="stat-label">机器人状态 {{ icon('pulse') }}</div><div class="stat-value status" id="badge"><span class="dot"></span><span id="badgeText">读取中</span></div><p id="botDetail">等待控制台响应</p></article>
+          <article class="stat-card"><div class="stat-label">已保存会话 {{ icon('chat') }}</div><div class="stat-value" id="metricChats">—</div><p>私聊与群聊独立保存</p></article>
+          <article class="stat-card"><div class="stat-label">持久化消息 {{ icon('database') }}</div><div class="stat-value" id="metricMessages">—</div><p id="metricSize">SQLite · 等待连接</p></article>
         </div>
-        <div>
-          <label>旧版群聊名单（只读）</label>
-          <textarea id="groups" readonly></textarea>
-        </div>
+        <div class="overview-grid"><section class="card connection-card"><div class="section-heading"><span class="section-icon">{{ icon('spark') }}</span><div><h2>模型连接</h2><p>当前使用的大语言模型</p></div><span class="pill" id="modelConfigured">读取中</span></div><dl class="detail-list"><div><dt>模型</dt><dd id="overviewModel" class="mono">—</dd></div><div><dt>接口地址</dt><dd id="overviewEndpoint" class="mono">—</dd></div><div><dt>上下文</dt><dd id="overviewContext">—</dd></div></dl><a class="text-link" href="#model">管理模型连接 {{ icon('arrow') }}</a></section><section class="card"><div class="section-heading"><span class="section-icon lavender">{{ icon('shield') }}</span><div><h2>运行前确认</h2><p>让自动回复保持安全、可靠</p></div></div><ul class="checklist"><li>{{ icon('check') }}微信在虚拟机内登录、解锁并保持前台</li><li>{{ icon('check') }}新聊天与群成员需批准后才会回复</li><li>{{ icon('check') }}发送结果不明的任务不会自动重发</li></ul><a href="#queue" class="text-link">查看任务队列 {{ icon('arrow') }}</a></section></div>
+        <div class="section-label">快捷入口 <span>QUICK ACCESS</span></div>
+        <div class="quick-grid"><a href="#chats" class="quick-card"><span class="section-icon">{{ icon('users') }}</span><div><strong>管理聊天</strong><small>批准用户与群聊</small></div>{{ icon('chevron') }}</a><a href="#roles" class="quick-card"><span class="section-icon lavender">{{ icon('file') }}</span><div><strong>自定义角色</strong><small>为不同会话设定风格</small></div>{{ icon('chevron') }}</a><a href="#knowledge" class="quick-card"><span class="section-icon sand">{{ icon('book') }}</span><div><strong>知识库</strong><small>添加专属知识与授权</small></div>{{ icon('chevron') }}</a></div>
       </div>
-      <label>机器人群昵称 bot_names（mention 模式必填，必须和群里显示完全一致）</label>
-      <textarea id="bot_names" placeholder="海豹色暹罗"></textarea>
-    </section>
-    <section class="card">
-      <h2>角色与群触发</h2>
-      <div class="modes">
-        <label><input type="radio" name="group_mode" value="mention"> @昵称才回</label>
-        <label><input type="radio" name="group_mode" value="prefix"> 指定前缀才回</label>
-        <label><input type="radio" name="group_mode" value="all"> 群内全部文本都回</label>
+      <div class="pane" data-pane="model" hidden>
+        <section class="card"><div class="section-heading"><span class="section-icon">{{ icon('spark') }}</span><div><h2>连接设置</h2><p>使用 OpenAI-compatible 接口；密钥只保存在本机 .env。</p></div><span class="pill">OWNER</span></div><fieldset data-owner-fields><label for="llm_base_url">接口地址 <span class="field-code">LLM_BASE_URL</span></label><input id="llm_base_url" type="url" placeholder="https://api.example.com/v1" autocomplete="off"><label for="llm_api_key">API Key</label><input id="llm_api_key" type="password" placeholder="留空则保留已保存的密钥" autocomplete="new-password"><p class="hint" id="keyhint">密钥状态读取中…</p><label for="llm_model">模型名称 <span class="field-code">LLM_MODEL</span></label><input id="llm_model" type="text" placeholder="输入服务商提供的模型名称" autocomplete="off"><div class="form-footer"><span class="hint">修改后需重启机器人生效。</span><div class="actions"><button data-action="testLlm" type="button">{{ icon('pulse') }}测试连接</button><button class="primary" data-action="saveCfg" type="button">{{ icon('save') }}保存配置</button></div></div></fieldset></section>
+        <div class="info-banner">{{ icon('lock') }}<p>不会展示完整 API Key。测试连接会向所配置的模型服务发送请求，可能产生费用。</p><a href="#capabilities">检查模型能力 {{ icon('arrow') }}</a></div>
       </div>
-      <label>群前缀 group_prefix</label>
-      <input id="group_prefix" type="text">
-      <label>旧版初始系统提示（只读；当前角色请在管理后台编辑）</label>
-      <textarea id="system_prompt" style="min-height:120px" readonly></textarea>
-      <details>
-        <summary>高级</summary>
-        <div class="row">
-          <div>
-            <label>上下文轮数</label>
-            <input id="context_turns" type="number" min="1" max="50">
-          </div>
-          <div>
-            <label>轮询秒数</label>
-            <input id="poll_seconds" type="number" min="0.5" max="60" step="0.1">
-          </div>
-          <div>
-            <label>模型超时秒</label>
-            <input id="timeout_seconds" type="number" min="1" max="180">
-          </div>
-          <div>
-            <label>max_tokens</label>
-            <input id="max_tokens" type="number" min="1" max="8000">
-          </div>
-          <div>
-            <label>最大输入字符</label>
-            <input id="max_input_chars" type="number" min="1" max="32000">
-          </div>
-          <div>
-            <label>最大回复字符</label>
-            <input id="max_reply_chars" type="number" min="1" max="4000">
-          </div>
-        </div>
-      </details>
-    </section>
-    <section class="card">
-      <h2>会话持久化</h2>
-      <div class="hint">上下文保存在本机 SQLite；数据库历史可以持续增长，但每次请求模型只读取最近的上下文轮数。</div>
-      <div id="storageSummary" class="hint">正在读取数据库状态...</div>
-      <div class="actions" style="margin-top:10px">
-        <button onclick="clearSelectedChat()">清空指定会话上下文</button>
-        <button class="danger" onclick="clearAllHistory()">清空全部上下文</button>
-      </div>
-      <label>要清空的会话</label>
-      <select id="storageChat"><option value="">暂无会话</option></select>
-    </section>
-    <section class="card">
-      <h2>身份与权限</h2>
-      <div class="hint">需要登录 Web 管理账户；仅后台账户可以成为 owner，微信身份不能成为 owner。权限修改下一条新消息生效；已在发送的消息无法撤回。</div>
-      <div class="hint">群新昵称先待确认，不调用模型。昵称不是稳定微信 ID；遇到重名或改名，请先停用并人工核对，不要盲目授权。</div>
-      <label for="principalSearch">搜索昵称或所在聊天（最多显示 200 个）</label>
-      <input type="text" id="principalSearch" maxlength="256" placeholder="输入关键词后点击刷新">
-      <div class="actions" style="margin-top:10px"><button onclick="refreshPrincipals()">刷新身份</button></div>
-      <label for="principalSelect">选择身份</label>
-      <select id="principalSelect" onchange="renderPrincipal()"><option value="">暂无已发现身份</option></select>
-      <pre id="principalDetails" style="margin-top:10px">尚未选择</pre>
-      <div class="actions" style="margin-top:10px">
-        <button class="primary" onclick="setPrincipalStatus('active')">核对并批准</button>
-        <button onclick="setPrincipalStatus('disabled')">停用身份</button>
-      </div>
-      <div class="row">
-        <div><label for="grantScope">权限范围</label><select id="grantScope"><option value="chat">当前聊天</option><option value="global">全局（仍为同一身份，不跨群合并）</option></select></div>
-        <div><label for="grantLevel">权限等级</label><select id="grantLevel"><option value="user">user 普通用户</option><option value="admin">admin 管理员</option><option value="blocked">blocked 静默拉黑</option></select></div>
-      </div>
-      <div class="actions" style="margin-top:10px">
-        <button onclick="changeGrant('set')">保存权限</button>
-        <button onclick="changeGrant('revoke')">移除本范围权限</button>
-      </div>
-      <div class="hint">全局或当前聊天的 blocked 都优先于 admin/user。解封时需移除对应 blocked，不能只在另一范围设为 user。群内 /ai status 仅已批准 admin 可用；群共享历史暂不允许通过 /ai reset 删除。</div>
-    </section>
-    <section class="card">
-      <h2>安全审计</h2>
-      <div class="actions"><button onclick="refreshAudit()">刷新最近 100 条</button></div>
-      <pre id="auditEvents" style="margin-top:10px">尚未读取</pre>
-      <div class="hint">只记录操作、身份 ID、权限变化和结果，不记录密钥或命令正文。此区域不自动滚动刷新。</div>
-    </section>
-    <section class="card">
-      <h2>日志</h2>
-      <details open>
-        <summary>机器人运行日志</summary>
-        <pre id="log">暂无日志</pre>
-      </details>
-      <details>
-        <summary>安装日志</summary>
-        <pre id="setupLog">暂无安装日志</pre>
-      </details>
-      <details>
-        <summary>控制台日志</summary>
-        <pre id="panelLog">暂无控制台日志</pre>
-      </details>
-    </section>
-  </div>
-  <script>
-    const $ = (id) => document.getElementById(id);
-    const listFields = ["private_chats", "groups", "bot_names"];
-    const numFields = ["poll_seconds", "context_turns", "max_input_chars", "max_reply_chars", "timeout_seconds", "max_tokens"];
-    let loaded = false;
-
-    function toast(text, ok) {
-      const el = $("toast");
-      el.textContent = text;
-      el.className = "toast show " + (ok ? "ok" : "err");
-    }
-
-    function lines(id) {
-      return $(id).value.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-    }
-
-    function payload() {
-      const mode = document.querySelector("input[name=group_mode]:checked");
-      const data = {
-        llm_base_url: $("llm_base_url").value.trim(),
-        llm_api_key: $("llm_api_key").value.trim(),
-        llm_model: $("llm_model").value.trim(),
-        private_chats: lines("private_chats"),
-        groups: lines("groups"),
-        bot_names: lines("bot_names"),
-        group_mode: mode ? mode.value : "mention",
-        group_prefix: $("group_prefix").value,
-        system_prompt: $("system_prompt").value,
-      };
-      for (const key of numFields) data[key] = Number($(key).value);
-      return data;
-    }
-
-    async function api(path, options) {
-      const res = await fetch(path, Object.assign({
-        headers: {"Content-Type": "application/json", "X-CSRF-Token": document.querySelector('meta[name="csrf-token"]').content}
-      }, options));
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || data.ok === false) throw new Error(data.error || ("HTTP " + res.status));
-      return data;
-    }
-
-    function applyState(data, fillForm) {
-      const running = !!data.running;
-      $("badge").className = "status" + (running ? " on" : "");
-      $("badgeText").textContent = running
-        ? ("运行中" + (data.pid ? "  PID " + data.pid : "") + (data.stop_requested ? "  正在停止" : ""))
-        : "未运行";
-      $("btnStart").disabled = running;
-      $("btnStop").disabled = !running;
-      if (fillForm) {
-        $("llm_base_url").value = data.llm_base_url || "";
-        $("llm_model").value = data.llm_model || "";
-        $("llm_api_key").value = "";
-        $("keyhint").textContent = data.llm_api_key_set
-          ? ("已保存密钥：" + (data.llm_api_key_masked || "****"))
-          : "还没有保存密钥";
-        const cfg = data.config || {};
-        for (const key of listFields) $(key).value = (cfg[key] || []).join("\n");
-        for (const key of numFields) $(key).value = cfg[key];
-        $("group_prefix").value = cfg.group_prefix || "/ai ";
-        $("system_prompt").value = cfg.system_prompt || "";
-        const mode = cfg.group_mode || "mention";
-        const radio = document.querySelector("input[name=group_mode][value='" + mode + "']");
-        if (radio) radio.checked = true;
-        if (data.config_error) toast("当前配置有问题：" + data.config_error, false);
-      }
-      $("log").textContent = data.log || "暂无机器人运行日志";
-      $("setupLog").textContent = data.setup_log || "暂无安装日志";
-      $("panelLog").textContent = data.panel_log || "暂无控制台日志";
-      applyStorage(data.storage || {});
-      if (fillForm) loaded = true;
-    }
-
-    function formatBytes(value) {
-      const n = Number(value || 0);
-      if (n < 1024) return n + " B";
-      if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
-      return (n / 1024 / 1024).toFixed(1) + " MB";
-    }
-
-    async function applyStorage(storage) {
-      if (!storage.ok) {
-        $("storageSummary").textContent = "数据库不可用：" + (storage.error || "未知错误");
-        return;
-      }
-      $("storageSummary").textContent =
-        "已启用 SQLite v" + storage.schema_version + " · 会话 " + storage.chat_count + " · 消息 " + storage.message_count +
-        " · 失败 " + storage.failed_count + " · 状态不明 " + storage.unknown_count +
-        " · 文件 " + formatBytes(storage.size_bytes);
-      try {
-        const data = await api("/api/storage/chats");
-        const select = $("storageChat");
-        const current = select.value;
-        select.replaceChildren();
-        if (!data.chats.length) {
-          select.add(new Option("暂无会话", ""));
-          return;
-        }
-        for (const chat of data.chats) {
-          const label = (chat.kind === "group" ? "群聊：" : "私聊：") + chat.name +
-            "（" + chat.message_count + " 条）";
-          select.add(new Option(label, chat.kind + "\t" + chat.name));
-        }
-        if ([...select.options].some(option => option.value === current)) select.value = current;
-      } catch (err) {
-        $("storageSummary").textContent += "（会话列表读取失败）";
-      }
-    }
-
-    async function refresh(fillForm) {
-      const data = await api(fillForm ? "/api/state" : "/api/log");
-      applyState(data, fillForm);
-    }
-
-    async function clearSelectedChat() {
-      const value = $("storageChat").value;
-      if (!value) return toast("请先选择会话", false);
-      const [kind, ...parts] = value.split("\t");
-      const name = parts.join("\t");
-      if (!confirm("确定清空“" + name + "”的全部上下文吗？")) return;
-      try {
-        const data = await api("/api/storage/clear-chat", {
-          method: "POST", body: JSON.stringify({kind, name})
-        });
-        toast(data.message || "已清空", true);
-        await refresh(true);
-      } catch (err) { toast(err.message, false); }
-    }
-
-    async function clearAllHistory() {
-      if (!confirm("确定清空所有好友和群聊的全部上下文吗？此操作不可恢复。")) return;
-      try {
-        const data = await api("/api/storage/clear-all", {
-          method: "POST", body: JSON.stringify({confirm:"clear-all"})
-        });
-        toast(data.message || "已清空", true);
-        await refresh(true);
-      } catch (err) { toast(err.message, false); }
-    }
-
-    async function saveCfg() {
-      try {
-        const data = await api("/api/save", {method: "POST", body: JSON.stringify(payload())});
-        toast(data.message || "已保存", true);
-        $("llm_api_key").value = "";
-        await refresh(true);
-      } catch (err) {
-        toast(err.message, false);
-      }
-    }
-
-    async function startBot() {
-      try {
-        const data = await api("/api/start", {method: "POST", body: JSON.stringify(payload())});
-        toast(data.message || "已启动", true);
-        $("llm_api_key").value = "";
-        applyState(data, false);
-        await refresh(true);
-      } catch (err) {
-        toast(err.message, false);
-        refresh(false);
-      }
-    }
-
-    async function stopBot() {
-      try {
-        const data = await api("/api/stop", {method: "POST", body: "{}"});
-        toast(data.message || "已停止", true);
-        applyState(data, false);
-        await refresh(false);
-      } catch (err) {
-        toast(err.message, false);
-      }
-    }
-
-    async function testLlm() {
-      try {
-        toast("正在测试模型...", true);
-        const data = await api("/api/test", {method: "POST", body: JSON.stringify(payload())});
-        toast((data.message || "模型可用") + (data.reply ? "  回复：" + data.reply : ""), true);
-      } catch (err) {
-        toast(err.message, false);
-      }
-    }
-
-    refresh(true).catch(err => toast(err.message, false));
-    setInterval(() => { if (loaded) refresh(false).catch(() => {}); }, 2000);
-
-    let principalRows = [];
-    function selectedPrincipal() {
-      return principalRows.find(p => String(p.id) === $("principalSelect").value);
-    }
-    function renderPrincipal() {
-      const p = selectedPrincipal();
-      $("principalDetails").textContent = p ? JSON.stringify({
-        id:p.id, nickname:p.display_name, chat:p.chat_name, kind:p.kind, status:p.status,
-        effective_permission:p.access_level, allowed:p.allowed, reason:p.reason, grants:p.grants
-      }, null, 2) : "尚未选择";
-    }
-    async function refreshPrincipals() {
-      try {
-        const previous = $("principalSelect").value;
-        const data = await api("/api/v1/principals?q=" + encodeURIComponent($("principalSearch").value));
-        principalRows = data.principals || [];
-        const select = $("principalSelect");
-        select.replaceChildren();
-        for (const p of principalRows) {
-          const option = document.createElement("option");
-          option.value = String(p.id);
-          option.textContent = "[" + p.status + " / " + p.access_level + "] " + p.display_name + " · " + (p.chat_name || p.kind);
-          select.appendChild(option);
-        }
-        if (!principalRows.length) {
-          const option = document.createElement("option"); option.value=""; option.textContent="暂无已发现身份"; select.appendChild(option);
-        } else if (principalRows.some(p => String(p.id) === previous)) select.value=previous;
-        renderPrincipal();
-      } catch (e) { toast(e.message, false); }
-    }
-    async function setPrincipalStatus(status) {
-      const p = selectedPrincipal();
-      if (!p) return toast("请先选择身份", false);
-      const message = status === "active"
-        ? "已人工核对这个身份，且所在群中没有重名、改名或冒名风险？批准后只处理下一条新消息。"
-        : "确认停用此身份？它将不调用模型且不执行命令。";
-      if (!confirm(message)) return;
-      try {
-        const data = await api("/api/v1/principals/"+p.id+"/status", {method:"POST",body:JSON.stringify({status,confirm_identity:true})});
-        toast(data.message,true); await refreshPrincipals(); await refreshAudit();
-      } catch (e) { toast(e.message,false); }
-    }
-    async function changeGrant(operation) {
-      const p = selectedPrincipal();
-      if (!p) return toast("请先选择身份",false);
-      if (!confirm("确认修改该身份在所选范围的权限？")) return;
-      try {
-        const data = await api("/api/v1/permissions", {method:"POST",body:JSON.stringify({
-          principal_id:p.id, chat_id:p.chat_id, scope:$("grantScope").value,
-          access_level:$("grantLevel").value, operation
-        })});
-        toast(data.message,true); await refreshPrincipals(); await refreshAudit();
-      } catch(e) { toast(e.message,false); }
-    }
-    async function refreshAudit() {
-      try {
-        const data = await api("/api/v1/audit");
-        $("auditEvents").textContent = (data.events || []).map(e => e.id+" "+e.created_at+" "+e.source+" "+e.action+" actor="+e.actor_principal_id+" target="+e.target_type+":"+e.target_id+" "+JSON.stringify(e.details)).join("\n") || "暂无审计事件";
-      } catch(e) { toast(e.message,false); }
-    }
-    refreshPrincipals();
-    refreshAudit();
-  </script>
+      <div class="pane" data-pane="reply" hidden><section class="card"><div class="section-heading"><span class="section-icon">{{ icon('chat') }}</span><div><h2>群聊触发方式</h2><p>控制 AI 在什么情况下参与群聊。</p></div></div><fieldset data-owner-fields><div class="mode-grid"><label class="mode-option"><input type="radio" name="group_mode" value="mention"><span><strong>@ 昵称</strong><small>被提及才回复</small></span></label><label class="mode-option"><input type="radio" name="group_mode" value="prefix"><span><strong>指定前缀</strong><small>匹配前缀才回复</small></span></label><label class="mode-option"><input type="radio" name="group_mode" value="all"><span><strong>全部消息</strong><small>处理所有有效触发</small></span></label></div><label for="bot_names">机器人群昵称</label><textarea id="bot_names" placeholder="每行一个昵称，须与群中显示完全一致"></textarea><p class="hint">@ 模式必填。不同群的昵称可以分行填写。</p><label for="group_prefix">触发前缀</label><input id="group_prefix" type="text" placeholder="/ai "><div class="form-footer"><span class="hint">回复对象由聊天审批与权限共同决定。</span><button class="primary" data-action="saveCfg" type="button">保存配置</button></div></fieldset></section><div class="info-banner">{{ icon('users') }}<p>新好友、群聊和未确认成员不会自动获得回复权限。</p><a href="#chats">管理回复对象 {{ icon('arrow') }}</a></div><details class="card legacy-details"><summary>旧版配置记录 <span class="hint">仅供查看，不再作为聊天和角色的权威来源</span></summary><label for="private_chats">首次导入的私聊名单</label><textarea id="private_chats" readonly></textarea><label for="groups">首次导入的群聊名单</label><textarea id="groups" readonly></textarea><label for="system_prompt">首次导入的系统提示词</label><textarea id="system_prompt" readonly></textarea></details></div>
+      <div class="pane" data-pane="runtime" hidden><section class="card"><div class="section-heading"><span class="section-icon">{{ icon('sliders') }}</span><div><h2>上下文与执行参数</h2><p>历史长期保留，但每轮只读取指定数量的已完成对话。</p></div></div><fieldset data-owner-fields><div class="form-grid"><div><label for="context_turns">上下文轮数</label><input id="context_turns" type="number" min="1" max="50"><p class="hint">每个会话最近 1–50 轮</p></div><div><label for="poll_seconds">轮询间隔 / 秒</label><input id="poll_seconds" type="number" min="0.5" max="60" step="0.1"><p class="hint">不代表每分钟回复限制</p></div><div><label for="timeout_seconds">模型超时 / 秒</label><input id="timeout_seconds" type="number" min="1" max="180"></div><div><label for="max_tokens">最大输出 tokens</label><input id="max_tokens" type="number" min="1" max="8000"></div><div><label for="max_input_chars">最大输入字符</label><input id="max_input_chars" type="number" min="1" max="32000"></div><div><label for="max_reply_chars">最大回复字符</label><input id="max_reply_chars" type="number" min="1" max="4000"></div></div><div class="form-footer"><span class="hint">配置修改需下次启动生效。</span><button class="primary" data-action="saveCfg" type="button">保存配置</button></div></fieldset></section></div>
+      <div class="pane" data-pane="storage" hidden><section class="card"><div class="section-heading"><span class="section-icon">{{ icon('database') }}</span><div><h2>本地 SQLite</h2><p>数据库保存在 data/wechat_ai.db，不上传云端。</p></div></div><div id="storageSummary" class="storage-summary">正在读取数据库状态…</div><label for="storageChat">指定会话</label><!-- console.js assigns untrusted chat labels with option.textContent for safe text rendering. --><select id="storageChat"><option value="">暂无会话</option></select><div class="form-footer"><p class="hint">请先停止机器人；清空不删除配置、密钥和日志。</p><button type="button" data-action="clearSelectedChat">清空所选会话上下文</button></div></section><section class="card danger-zone"><h2>清空全部上下文</h2><p>将删除所有好友和群聊的对话历史，无法撤销。</p><button class="danger" type="button" data-action="clearAllHistory">清空全部上下文</button></section></div>
+      <div class="pane" data-pane="permissions" hidden><section class="card"><div class="section-heading"><span class="section-icon">{{ icon('shield') }}</span><div><h2>身份与权限</h2><p>仅后台账户可以成为 owner。群昵称不是稳定的微信身份标识。</p></div></div><label for="principalSearch">查找身份</label><div class="search-row"><input type="search" id="principalSearch" maxlength="256" placeholder="搜索昵称或所在聊天"><button type="button" data-action="refreshPrincipals">搜索 / 刷新</button></div><label for="principalSelect">选择身份</label><select id="principalSelect"><option value="">尚未读取</option></select><pre id="principalDetails" class="code-block">尚未选择</pre><div class="actions"><button type="button" data-status="active">确认并批准身份</button><button type="button" data-status="disabled" class="danger-text">停用身份</button></div><div class="form-grid"><div><label for="grantScope">权限范围</label><select id="grantScope"><option value="chat">当前聊天</option><option value="global">全局（同一身份）</option></select></div><div><label for="grantLevel">权限等级</label><select id="grantLevel"><option value="user">user · 普通用户</option><option value="admin">admin · 管理员</option><option value="blocked">blocked · 静默拉黑</option></select></div></div><div class="form-footer"><p class="hint">blocked 始终优先；解封需移除对应范围的 blocked。</p><div class="actions"><button type="button" data-grant="revoke">移除所选范围权限</button><button type="button" class="primary" data-grant="set">保存权限</button></div></div></section><div class="info-banner">{{ icon('lock') }}<p>重名或改名请先停用并核对，不要盲目授权。权限修改会写入右侧的安全审计日志。</p></div></div>
+      <div class="pane" data-pane="manager" hidden><section class="card management-content" id="content" aria-busy="false"></section></div>
+      <footer class="workspace-footer"><span>WeChat AI Workspace</span><span>本地运行 · 会话隔离 · 权限优先</span></footer>
+    </div>
+  </main>
+  <aside class="log-panel" id="logPanel" aria-label="实时日志">
+    <header class="log-heading"><div>{{ icon('terminal') }}<strong>输出日志</strong><span class="live-dot" id="logLiveDot"></span></div><button class="icon-button" id="closeLogs" type="button" title="折叠日志栏" aria-label="折叠日志栏">{{ icon('right') }}</button></header>
+    <div class="log-tabs" role="tablist" aria-label="日志来源"><button role="tab" id="tab-all" data-log="all" aria-selected="true" aria-controls="logViewport">全部</button><button role="tab" id="tab-bot" data-log="bot" aria-selected="false" aria-controls="logViewport" tabindex="-1">运行</button><button role="tab" id="tab-setup" data-log="setup" aria-selected="false" aria-controls="logViewport" tabindex="-1">安装</button><button role="tab" id="tab-panel" data-log="panel" aria-selected="false" aria-controls="logViewport" tabindex="-1">控制台</button></div>
+    <div class="log-filter"><label class="log-search">{{ icon('search') }}<input id="logSearch" type="search" placeholder="筛选日志…" aria-label="筛选日志关键词"></label><select id="logLevel" aria-label="日志等级"><option value="all">所有等级</option><option value="warn">警告及错误</option><option value="error">仅错误</option></select></div>
+    <div class="log-sources"><span>更多来源</span><button data-log-extra="audit" type="button" aria-pressed="false">审计</button><button data-log-extra="tools" type="button" aria-pressed="false">工具</button><button data-log-extra="diagnostics" type="button" aria-pressed="false">诊断</button></div>
+    <div class="log-toolbar"><button type="button" id="pauseLogs" aria-pressed="false">暂停更新</button><label><input id="autoScroll" type="checkbox" checked>自动滚动</label><span class="toolbar-spacer"></span><button class="icon-button" id="copyLogs" type="button" title="复制筛选后的日志" aria-label="复制筛选后的日志">{{ icon('copy') }}</button><button class="icon-button" id="downloadLogs" type="button" title="导出当前日志片段" aria-label="导出当前日志片段">{{ icon('download') }}</button></div>
+    <div class="log-caption"><span id="logSourceTitle">全部来源 · 最近记录</span><span id="logCount">0 条</span></div>
+    <div id="logError" class="log-error" role="status" hidden></div>
+    <div class="log-viewport" id="logViewport" role="tabpanel" aria-labelledby="tab-all" tabindex="0"><div class="log-empty">{{ icon('terminal') }}<strong>等待日志</strong><span>连接成功后，运行记录会显示在这里。</span></div></div>
+    <footer class="log-footer"><span id="logUpdate">等待连接…</span><span>只读输出</span></footer>
+  </aside>
+  <footer class="statusbar"><div><span class="connection-dot" id="statusConnection"></span><span id="connectionText">正在连接</span><span class="status-separator">/</span><span class="mono" id="statusSchema">SQLite</span></div><div><span id="saveStatus">配置未读取</span><span class="status-separator">/</span><span class="mono">UTF-8</span><button type="button" id="statusLogToggle" aria-controls="logPanel">{{ icon('terminal') }}日志</button></div></footer>
+</div>
+<dialog id="actionDialog" class="action-dialog" aria-labelledby="dialogTitle"><form id="dialogForm" method="dialog"><div class="dialog-heading"><span class="section-icon">{{ icon('sliders') }}</span><button class="icon-button" id="dialogClose" type="button" aria-label="取消并关闭">{{ icon('close') }}</button></div><h2 id="dialogTitle">确认操作</h2><p id="dialogDescription"></p><label id="dialogInputLabel" for="dialogInput">输入内容</label><input id="dialogInput" autocomplete="off"><div class="dialog-actions"><button id="dialogCancel" type="button">取消</button><button id="dialogSubmit" class="primary" type="submit">确认</button></div></form></dialog>
 </body>
 </html>
