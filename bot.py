@@ -418,6 +418,7 @@ class WeChatDesktop:
         self.tracker = SnapshotTracker()
         self.known = set()
         self.ready = False
+        self._chat_skip_log = {}
         try:
             import ctypes
             self.scale = ctypes.windll.user32.GetDpiForWindow(self.hwnd) / 96 or 1.0
@@ -442,14 +443,47 @@ class WeChatDesktop:
     def sessions(self) -> list[Session]:
         items = self.window.child_window(**self.Main.SessionList).children(control_type="ListItem")
         result, counts = [], {}
+        ignored = set(getattr(self.Texts, "NotCare", ()))
         for item in items:
             key = item.automation_id()
-            if not key.startswith("session_item_"):
+            # 服务号/公众号是聚合入口，不是可收发消息的聊天。点击它们后
+            # 没有普通聊天标题或输入框，因此不应进入会话核验流程。
+            if not key.startswith("session_item_") or key in ignored:
+                continue
+            name = key.removeprefix("session_item_").strip()
+            if not name:
                 continue
             index = counts.get(key, 0)
             counts[key] = index + 1
-            result.append(Session(key, key.removeprefix("session_item_"), index))
+            result.append(Session(key, name, index))
         return result
+
+    def _log_chat_skip(self, session: Session, exc: BotError) -> None:
+        """Log a failed activation once per minute instead of once per poll."""
+        detail = " ".join(str(exc).split())[:300] or type(exc).__name__
+        if "草稿" in detail:
+            reason = "input_draft"
+        elif "标题" in detail:
+            reason = "title_unverified"
+        elif "可见会话列表" in detail:
+            reason = "session_not_visible"
+        elif "输入框" in detail:
+            reason = "input_unavailable"
+        else:
+            reason = "activation_failed"
+        key = (session.key, session.occurrence, reason, detail)
+        now = time.monotonic()
+        skip_log = getattr(self, "_chat_skip_log", {})
+        self._chat_skip_log = skip_log
+        last, suppressed = skip_log.get(key, (0.0, 0))
+        if now - last < 60.0:
+            self._chat_skip_log[key] = (last, suppressed + 1)
+            return
+        log.info(
+            "chat_skipped chat=%r reason=%s detail=%r suppressed=%d",
+            session.name, reason, detail, suppressed,
+        )
+        self._chat_skip_log[key] = (now, 0)
 
     def current(self) -> tuple[str, str]:
         title = self.window.child_window(**self.Texts.CurrentChatNameText)
@@ -518,9 +552,16 @@ class WeChatDesktop:
                 kind = self.activate(session)
             except FocusLost:
                 raise
-            except BotError:
-                log.info("chat_skipped reason=not_visible_or_unverified")
+            except BotError as exc:
+                self._log_chat_skip(session, exc)
                 continue
+            # A recovered chat may report a future failure immediately instead of
+            # inheriting the previous throttle window.
+            prefix = (session.key, session.occurrence)
+            self._chat_skip_log = {
+                key: value for key, value in getattr(self, "_chat_skip_log", {}).items()
+                if key[:2] != prefix
+            }
             seen.append((kind, session.name))
             chat = self.chats.discover(kind, session.name, session.key)
             key = str(chat['id']) + ':' + str(session.occurrence)

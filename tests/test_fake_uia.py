@@ -14,6 +14,38 @@ def row(name="Member", side="left", text="/ai status"):
     return FakeControl(text, children=[FakeControl(children=[avatar])])
 
 
+def test_sessions_ignore_aggregate_entries():
+    desktop = WeChatDesktop.__new__(WeChatDesktop)
+    items = [
+        FakeControl(automation_id="session_item_服务号", kind="ListItem"),
+        FakeControl(automation_id="session_item_公众号", kind="ListItem"),
+        FakeControl(automation_id="session_item_Friend", kind="ListItem"),
+    ]
+    session_list = SimpleNamespace(children=lambda **_: items)
+    desktop.window = SimpleNamespace(child_window=lambda **_: session_list)
+    desktop.Main = SimpleNamespace(SessionList={"auto_id": "sessions"})
+    desktop.Texts = SimpleNamespace(
+        NotCare={"session_item_服务号", "session_item_公众号"}
+    )
+
+    assert desktop.sessions() == [Session("session_item_Friend", "Friend", 0)]
+
+
+def test_chat_skip_log_is_detailed_and_throttled(caplog):
+    desktop = WeChatDesktop.__new__(WeChatDesktop)
+    desktop._chat_skip_log = {}
+    session = Session("session_item_Friend", "Friend", 0)
+    caplog.set_level(20, logger="minimal_wechat_ai")
+
+    desktop._log_chat_skip(session, ValueError("切换聊天后标题核验失败"))
+    desktop._log_chat_skip(session, ValueError("切换聊天后标题核验失败"))
+
+    records = [r for r in caplog.records if "chat_skipped" in r.getMessage()]
+    assert len(records) == 1
+    assert "chat='Friend'" in records[0].getMessage()
+    assert "reason=title_unverified" in records[0].getMessage()
+
+
 def test_avatar_nested_name_and_geometry():
     assert group_sender_name(row()) == "Member"
     assert uia_row_direction(row()) == "incoming"
