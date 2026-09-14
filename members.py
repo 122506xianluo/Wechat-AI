@@ -192,7 +192,13 @@ class Members:
 
 
 def extract_sender(row, known_names=()):
-    """Only unique, structurally supported candidates; arbitrary message text is not identity."""
+    """Resolve a group sender from UIA children or WeChat's row-name prefix.
+
+    WeChat 4.1.13.12 exposes ``ChatTextItemView`` as a leaf ListItem. Its UIA
+    name is ``<group nickname><space><message>`` and there is no avatar child to
+    inspect. Prefer registered aliases, then accept the first field only for a
+    previously unseen nickname. This matches pyweixin 1.9.8's group parser.
+    """
 
     def walk(node, depth=0):
         if depth > 5:
@@ -234,10 +240,33 @@ def extract_sender(row, known_names=()):
             pass
     full = text(row)
     known = {normalize_name(n): n for n in known_names}
+    # Leaf rows in WeChat 4.1.13.12 expose only a combined accessible name.
+    # Longest-first preserves registered nicknames which contain spaces.
+    for name in sorted(known.values(), key=len, reverse=True):
+        if full.startswith(name) and full[len(name):len(name) + 1].isspace():
+            return name, "row_known_prefix", 0.95
     # Row/content difference only accepted if it is an already registered exact alias.
     for ctrl in texts:
         body = text(ctrl)
         prefix = full[: -len(body)].strip() if body and full.endswith(body) else ""
         if normalize_name(prefix) in known:
             return known[normalize_name(prefix)], "exact_alias_difference", 0.85
+    # First observation has no alias to compare against. A leaf text row still
+    # has a stable structural separator supplied by WeChat. Do not accept empty
+    # content, control characters, or an implausibly long first field.
+    parts = full.split(None, 1)
+    if len(parts) == 2:
+        candidate, body = parts[0].strip(), parts[1].strip()
+        if (candidate and body and len(candidate) <= 64
+                and not any(ord(ch) < 32 for ch in candidate)):
+            return candidate, "row_name_prefix", 0.75
     return "", "no_structural_sender", 0.0
+
+
+def strip_sender_prefix(text, sender):
+    """Remove the verified UIA nickname prefix before trigger/LLM handling."""
+    if not sender or not isinstance(text, str):
+        return text
+    if text.startswith(sender) and text[len(sender):len(sender) + 1].isspace():
+        return text[len(sender):].lstrip()
+    return text

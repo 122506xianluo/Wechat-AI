@@ -624,10 +624,12 @@ class WeChatDesktop:
                     # Commands require UIA evidence, not a trigger or screenshot.
                     verified = uia_row_direction(row) == "incoming"
                     if kind == "group":
-                        from members import extract_sender
+                        from members import extract_sender, strip_sender_prefix
                         with self.chats.storage._connection() as connection:
                             aliases = [r[0] for r in connection.execute("SELECT name FROM principal_aliases WHERE chat_id=? AND status='active'", (chat["id"],))]
                         sender, method, confidence = extract_sender(row, aliases)
+                        if sender:
+                            text = strip_sender_prefix(text, sender)
                     else:
                         sender = session.name
                 except Exception:
@@ -844,7 +846,10 @@ class Bot:
             except FocusLost:
                 ready = False
                 focused_since = None
-                log.info("paused reason=focus_lost history_will_rebaseline=true")
+                log.info(
+                    "paused reason=focus_lost message_baseline_will_rebuild=true "
+                    "sqlite_context_preserved=true"
+                )
                 time.sleep(.25)
                 continue
             time.sleep(self.cfg.poll_seconds)
