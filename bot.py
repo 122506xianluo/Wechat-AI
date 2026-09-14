@@ -253,9 +253,9 @@ def _normalized_wechat_name(value: str) -> str:
     return re.sub(r"[\s\u2005]+", "", value or "")
 
 
-def group_sender_name(row) -> str:
+def group_sender_name(row, *, row_prefix_enabled=False) -> str:
     from members import extract_sender
-    return extract_sender(row)[0]
+    return extract_sender(row, row_prefix_enabled=row_prefix_enabled)[0]
 
 
 def uia_row_direction(row) -> str:
@@ -376,10 +376,11 @@ def bubble_direction(image, scale: float = 1.0, kind: str = "private") -> str:
 
 
 def row_direction(row, scale: float = 1.0, kind: str = "private",
-                  bot_names: tuple[str, ...] | list[str] = ()) -> str:
+                  bot_names: tuple[str, ...] | list[str] = (),
+                  *, group_sender_prefix=False) -> str:
     """Sender name first for groups, then UIA position and screenshot fallbacks."""
     if kind == "group":
-        sender = group_sender_name(row)
+        sender = group_sender_name(row, row_prefix_enabled=group_sender_prefix)
         if sender:
             normalized = _normalized_wechat_name(sender)
             mine = {_normalized_wechat_name(name) for name in bot_names}
@@ -404,12 +405,13 @@ class WeChatDesktop:
     def __init__(self, cfg: Config):
         from pywinauto import Desktop
         from pyweixin import Tools
-        from pyweixin.Uielements import Main_window, Texts, Edits, Buttons
+        from pyweixin.Uielements import Main_window, Texts, Edits, Buttons, CheckBoxes
         import win32gui
 
         self.cfg, self.policy = cfg, Policy(cfg)
         self.Tools, self.Main = Tools, Main_window
         self.Texts, self.Edits, self.Buttons = Texts, Edits, Buttons
+        self.CheckBoxes = CheckBoxes
         self.gui = win32gui
         self.desktop = Desktop(backend="uia")
         windows = self.desktop.windows(class_name="mmui::MainWindow", visible_only=False)
@@ -422,6 +424,7 @@ class WeChatDesktop:
         self.ready = False
         self._chat_skip_log = {}
         self._unsupported_sessions = set()
+        self._group_sender_prefix_ready = set()
         try:
             import ctypes
             self.scale = ctypes.windll.user32.GetDpiForWindow(self.hwnd) / 96 or 1.0
@@ -541,6 +544,8 @@ class WeChatDesktop:
                 # 标题、聊天类型和输入框可能分阶段加载，必须一起就绪后
                 # 才算切换成功，不能在标题刚出现时立即判定失败。
                 if kind in ("private", "group") and self._edit(required=False) is not None:
+                    if kind == "group":
+                        self.ensure_group_sender_names(name)
                     return kind
             if time.monotonic() >= deadline:
                 if matched_title and last_kind == "other":
@@ -552,6 +557,39 @@ class WeChatDesktop:
                     raise BotError("切换聊天后输入框不可读")
                 raise BotError("切换聊天后标题核验失败")
             time.sleep(.05)
+
+    def ensure_group_sender_names(self, name: str) -> None:
+        """Enable the local WeChat setting required for reliable group identity."""
+        if name in self._group_sender_prefix_ready:
+            return
+        self.require_foreground()
+        if self.current() != (name, "group"):
+            raise BotError("开启群成员昵称前聊天核验失败")
+        button = self.window.child_window(**self.Buttons.ChatInfoButton)
+        pane = self.window.child_window(
+            class_name="mmui::ChatRoomMemberInfoView", control_type="Group"
+        )
+        if not pane.exists(timeout=.2) or not pane.is_visible():
+            button.click_input()
+        try:
+            if not pane.exists(timeout=1):
+                raise BotError("群聊信息面板不可读")
+            checkbox = pane.child_window(**self.CheckBoxes.OnScreenNamesCheckBox)
+            if not checkbox.exists(timeout=1):
+                raise BotError("找不到“显示群成员昵称”设置")
+            if not checkbox.get_toggle_state():
+                checkbox.click_input()
+                time.sleep(.2)
+            if not checkbox.get_toggle_state():
+                raise BotError("无法开启“显示群成员昵称”设置")
+        finally:
+            if pane.exists(timeout=.1) and pane.is_visible():
+                button.click_input()
+                time.sleep(.2)
+        if self.current() != (name, "group") or self._edit(required=False) is None:
+            raise BotError("开启群成员昵称后聊天核验失败")
+        self._group_sender_prefix_ready.add(name)
+        log.info("group_sender_names ready=true chat=%s", name)
 
     def rows(self):
         messages = self.window.child_window(**self.Main.FriendChatList)
@@ -620,14 +658,22 @@ class WeChatDesktop:
                 source_key = sha256((key + "|" + "|".join(tokens[max(0,index-8):index+1]) + "|" + str(index)).encode()).hexdigest()
                 method, confidence = "uia_avatar", 1.0
                 try:
-                    direction = row_direction(row, self.scale, kind, self.cfg.bot_names)
+                    prefix_ready = (
+                        kind == "group" and session.name in self._group_sender_prefix_ready
+                    )
+                    direction = row_direction(
+                        row, self.scale, kind, self.cfg.bot_names,
+                        group_sender_prefix=prefix_ready,
+                    )
                     # Commands require UIA evidence, not a trigger or screenshot.
                     verified = uia_row_direction(row) == "incoming"
                     if kind == "group":
                         from members import extract_sender, strip_sender_prefix
                         with self.chats.storage._connection() as connection:
                             aliases = [r[0] for r in connection.execute("SELECT name FROM principal_aliases WHERE chat_id=? AND status='active'", (chat["id"],))]
-                        sender, method, confidence = extract_sender(row, aliases)
+                        sender, method, confidence = extract_sender(
+                            row, aliases, row_prefix_enabled=prefix_ready
+                        )
                         if sender:
                             text = strip_sender_prefix(text, sender)
                     else:

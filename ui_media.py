@@ -82,7 +82,11 @@ def exact_row(desktop, message, item):
         from members import extract_sender
         from permissions import normalize_name
 
-        sender, _, _ = extract_sender(row, [message.sender_name])
+        sender, _, _ = extract_sender(
+            row,
+            [message.sender_name],
+            row_prefix_enabled=message.chat in desktop._group_sender_prefix_ready,
+        )
         if not sender or normalize_name(sender) != normalize_name(message.sender_name):
             raise UnsupportedMedia("附件群成员核验失败")
     return row
