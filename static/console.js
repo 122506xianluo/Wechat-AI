@@ -13,8 +13,9 @@
     reply: ['回复规则', 'AI CONFIG / REPLY', '决定机器人何时参与群聊，以及使用哪些触发词。'],
     runtime: ['运行参数', 'SYSTEM / RUNTIME', '调整上下文、轮询与输出限制。'],
     storage: ['数据持久化', 'SYSTEM / STORAGE', '查看本地 SQLite 状态并管理对话历史。'],
-        chats: ['聊天管理', 'WORKSPACE / CHATS', '手动添加私聊，读取并启用当前微信群。'],
-    members: ['用户权限', 'WORKSPACE / USERS', '快捷允许、停用用户并设置剩余调用次数。'],
+    permissions: ['身份与权限', 'SYSTEM / ACCESS', '批准聊天、管理身份与权限范围。'],
+    chats: ['聊天与用户', 'WORKSPACE / CHATS', '批准、停用和管理私聊与群聊。'],
+    members: ['群成员', 'WORKSPACE / MEMBERS', '确认群成员身份并设置群内权限。'],
     queue: ['任务队列', 'WORKSPACE / QUEUE', '处理异常任务，避免不明确消息重复发送。'],
     roles: ['角色与提示词', 'AI CONFIG / ROLES', '为不同聊天定义独立的 AI 个性与规则。'],
     contexts: ['会话上下文', 'AI CONFIG / CONTEXTS', '查看和清理隔离的对话范围。'],
@@ -23,11 +24,11 @@
     attachments: ['附件管理', 'WORKSPACE / ATTACHMENTS', '查看图片、语音和文档的提取状态。'],
     capabilities: ['模型能力', 'AI CONFIG / CAPABILITIES', '分别检查 tools、vision、embeddings 与 transcription。'],
     diagnostics: ['身份诊断', 'SYSTEM / DIAGNOSTICS', '查看群成员识别路径和失败原因。'],
-    account: ['本地与备份', 'SYSTEM / LOCAL', '查看本机访问边界并创建数据库备份。']
+    account: ['账户与备份', 'SYSTEM / ACCOUNT', '管理后台账户、会话和数据库备份。']
   };
   const managementMap = {
-    chats: '聊天管理', members: '用户权限', queue: '任务队列', roles: '角色', contexts: '上下文',
-    knowledge: '知识库', tools: '只读工具', attachments: '附件', capabilities: '模型能力', diagnostics: '身份诊断', account: '本地与备份'
+    chats: '聊天/私聊用户', members: '群成员/权限', queue: '任务队列', roles: '角色', contexts: '上下文',
+    knowledge: '知识库', tools: '只读工具', attachments: '附件', capabilities: '模型能力', diagnostics: '身份诊断', account: '账户/备份'
   };
 
   function formatBytes(value) {
@@ -174,7 +175,7 @@
     const badge = $('badge');
     if (badge) badge.className = 'status' + (running ? ' on' : '');
     if ($('badgeText')) $('badgeText').textContent = running ? '运行中' + (data.pid ? ' · PID ' + data.pid : '') + (data.stop_requested ? ' · 正在停止' : '') : '未运行';
-    if ($('botDetail')) $('botDetail').textContent = running ? '自动回复服务正在处理已添加并启用的会话' : '服务当前处于停止状态';
+    if ($('botDetail')) $('botDetail').textContent = running ? '自动回复服务正在处理已批准会话' : '服务当前处于停止状态';
     if ($('btnStart')) $('btnStart').disabled = running;
     if ($('btnStop')) $('btnStop').disabled = !running;
     if ($('sideState')) $('sideState').textContent = running ? '机器人运行中' : '机器人已停止';

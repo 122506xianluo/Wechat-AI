@@ -37,10 +37,6 @@ class JobQueue:
             ).fetchone()
             if old:
                 return None
-            if job_type == "reply":
-                from user_access import UserAccess
-                if not UserAccess.reserve_request(c, principal_id, chat_id):
-                    return None
             c.execute(
                 "INSERT INTO inbound_dedup VALUES(?,?,?,?)",
                 (chat_id, source_key, jid, now),

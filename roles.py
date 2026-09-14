@@ -7,9 +7,9 @@ from permissions import PermissionDenied, _decision
 
 def require_manager(c, actor, owner=False):
     if actor.source != "web":
-        raise PermissionDenied("仅允许本地 Web 控制台操作")
+        raise PermissionDenied("仅允许已登录的 Web 管理员")
     if actor.principal_id is None and actor.access_level == "owner":
-        return  # Set only after the HTTP loopback, Host, Origin and CSRF checks.
+        return  # temporary loopback owner, removed at the HTTP boundary in step 8
     current = _decision(c, actor.principal_id, None)
     if not current.allowed or current.access_level not in (
         ("owner",) if owner else ("owner", "admin")

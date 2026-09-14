@@ -1,4 +1,4 @@
-"""Versioned management endpoints protected by the loopback and CSRF guard."""
+"""Versioned management endpoints; all requests pass the application's auth guard."""
 
 from flask import Blueprint, g, jsonify, request, render_template
 from roles import Roles
@@ -61,44 +61,6 @@ def register_admin(app, get_storage, error):
         return jsonify(ok=True)
 
     from chats import Chats
-
-    @api.post("/api/v1/chats")
-    def chat_add():
-        data = payload()
-        if set(data) - {'kind', 'name'}:
-            raise ValueError("会话字段无效")
-        return jsonify(ok=True, item=Chats(get_storage()).add(data.get('kind'), data.get('name'), g.actor))
-
-    @api.post("/api/v1/chats/current-group")
-    def current_group():
-        if app.bot_is_running():
-            raise ValueError("请先停止机器人，再读取微信当前群名")
-        from bot import InstanceLock
-        from ui_maintenance import read_current_group
-        lock = InstanceLock(get_storage().root / 'data' / 'bot.lock')
-        try:
-            name = read_current_group()
-        finally:
-            lock.close()
-        # Reading does not enable replies; the UI provides a separate explicit add.
-        return jsonify(ok=True, name=name, kind='group')
-
-    from user_access import UserAccess
-
-    @api.get("/api/v1/users")
-    def users_list():
-        try:
-            offset = int(request.args.get('offset', '0'))
-            limit = int(request.args.get('limit', '50'))
-        except ValueError:
-            raise ValueError("分页参数无效") from None
-        return jsonify(ok=True, **UserAccess(get_storage()).list(
-            request.args.get('q', ''), request.args.get('kind', ''), offset, limit))
-
-    @api.post("/api/v1/users/<int:principal_id>")
-    def user_update(principal_id):
-        UserAccess(get_storage()).update(principal_id, payload(), g.actor)
-        return jsonify(ok=True, message='已保存，下一条新消息生效')
 
     @api.get("/api/v1/chats")
     def chats_list():

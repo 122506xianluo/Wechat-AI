@@ -59,30 +59,6 @@ class Chats:
             )
             return dict(row)
 
-    def add(self, kind, name, actor):
-        """Explicit local opt-in; scanning an unknown chat never enables it."""
-        if kind not in ('private', 'group') or not isinstance(name, str):
-            raise ValueError("会话类型或名称无效")
-        name = name.strip()
-        if not name or len(name) > 256 or any(ch in name for ch in '\r\n\x00'):
-            raise ValueError("请填写 1~256 字的微信备注名或群名，每次添加一个")
-        with self.storage.transaction() as c:
-            require_manager(c, actor)
-            now = utc_now()
-            c.execute("""INSERT INTO chats(kind,name,enabled,approval,created_at,updated_at)
-                VALUES(?,?,1,'approved',?,?) ON CONFLICT(kind,name) DO NOTHING""", (kind, name, now, now))
-            row = c.execute('SELECT * FROM chats WHERE kind=? AND name=?', (kind, name)).fetchone()
-            if row['merged_into']:
-                raise ValueError("会话已经合并，请使用合并后的名称")
-            if not row['enabled'] or row['approval'] != 'approved':
-                c.execute("UPDATE chats SET enabled=1,approval='approved',baseline_revision=baseline_revision+1,updated_at=? WHERE id=?", (now, row['id']))
-            if kind == 'private':
-                Permissions._observe(c, 'private_user', row['id'], name, status='active')
-            record_audit(c, 'chat.add', source=actor.source, actor_id=actor.principal_id,
-                         target_type='chat', target_id=row['id'], details={'kind': kind})
-            bump_permission_revision(c)
-            return dict(c.execute('SELECT * FROM chats WHERE id=?', (row['id'],)).fetchone())
-
     def get(self, kind, name):
         with self.storage._connection() as c:
             row = c.execute(
@@ -98,22 +74,6 @@ class Chats:
             and row["approval"] == "approved"
             and not row["merged_into"]
         )
-
-    def monitored_names(self) -> set[str]:
-        """Names the live UI scanner is allowed to activate.
-
-        The session list does not reliably expose chat type before activation, so
-        this is deliberately a name set. The detected type is checked again after
-        activation before any rows are read.
-        """
-        with self.storage._connection() as c:
-            return {
-                str(row[0])
-                for row in c.execute(
-                    "SELECT DISTINCT name FROM chats "
-                    "WHERE enabled=1 AND approval='approved' AND merged_into IS NULL"
-                )
-            }
 
     def list(self, query=""):
         with self.storage._connection() as c:

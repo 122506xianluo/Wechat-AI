@@ -55,39 +55,38 @@ class Engine:
         b = self.bot
         if b.stopped() or not b.chats.allowed(message.kind, message.chat):
             return None
-        if message.direction != "incoming" or len(message.text) > b.cfg.max_input_chars:
-            return None
-        chat = b.chats.get(message.kind, message.chat)
-        if self.jobs.seen(chat['id'], message.source_key or message.id):
-            return None
-        command = parse_command(message.text, b.cfg.bot_names) if not message.attachments else None
-        # First establish a valid trigger. Ordinary group chatter and our own
-        # bubbles must not populate the member list or create permissions.
-        if command:
-            if not message.direction_verified or not command.valid:
-                return None
-            question = message.text
-        elif message.attachments and (message.kind == "private" or b.cfg.group_mode == "all"):
-            question = message.text.strip() or "请理解所附内容，并用文字回答。"
-        else:
-            question = b.policy.prompt(message)
-            if question is None:
-                return None
         d = b.permissions.resolve_incoming(
-            message.kind, message.chat, message.sender_name, message.direction,
-            sender_method=message.sender_method, sender_confidence=message.sender_confidence,
+            message.kind, message.chat, message.sender_name, message.direction
         )
-        if not d.allowed:
-            logging.getLogger("minimal_wechat_ai").info(
-                "request_skipped reason=%s kind=%s", d.reason, message.kind
-            )
+        if not d.allowed or len(message.text) > b.cfg.max_input_chars:
             return None
+        if self.jobs.seen(d.chat_id, message.source_key or message.id):
+            return None
+        scope = b.contexts.resolve(d.chat_id, d.principal_id)
+        command = (
+            parse_command(message.text, b.cfg.bot_names)
+            if not message.attachments
+            else None
+        )
         answer = None
         if command:
+            if not message.direction_verified:
+                b.permissions.audit_command(d, command.name, "direction_unverified")
+                return None
             answer = b.commands.execute(command, d, message.kind)
             if not answer:
                 return None
-        scope = b.contexts.resolve(d.chat_id, d.principal_id)
+            question = message.text
+            scope = b.contexts.resolve(d.chat_id, d.principal_id)
+        else:
+            if message.attachments and (
+                message.kind == "private" or b.cfg.group_mode == "all"
+            ):
+                question = message.text.strip() or "请理解所附内容，并用文字回答。"
+            else:
+                question = b.policy.prompt(message)
+            if question is None:
+                return None
         payload = {
             "message": asdict(message),
             "question": question,
@@ -104,17 +103,7 @@ class Engine:
             answer=answer,
             job_type="command" if command else "reply",
         )
-        if not jid:
-            from user_access import UserAccess
-            reason = UserAccess(self.bot.storage).request_block_reason(
-                d.principal_id, d.chat_id
-            )
-            logging.getLogger("minimal_wechat_ai").info(
-                "request_skipped reason=%s kind=%s",
-                reason or "duplicate_or_access_changed", message.kind,
-            )
-            return None
-        if message.attachments:
+        if jid and message.attachments:
             try:
                 job = self.jobs.get(jid)
                 ids = b.media.capture(job, message, b.desktop)
@@ -278,6 +267,15 @@ class Engine:
                     continue
             message = Message(**data["message"])
             command = parse_command(message.text, b.cfg.bot_names)
+            if (
+                command
+                and message.kind == "group"
+                and command.name == "status"
+                and decision.access_level != "admin"
+            ):
+                self.jobs.finish(job["id"], "cancelled", "command_permission_revoked")
+                b.permissions.audit_command(decision, command.name, "reply_revoked")
+                continue
             try:
                 # UI adapter calls this only after all prefill checks, immediately before touching text.
                 def before_fill():

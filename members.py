@@ -16,11 +16,9 @@ class Members:
         self.storage = storage
         self.counts = {}
 
-    def observe(self, chat_id, name, method="uia_avatar", confidence=1.0, features=(), *, auto_enable=False):
+    def observe(self, chat_id, name, method="uia_avatar", confidence=1.0, features=()):
         normalized = normalize_name(name)
         with self.storage.transaction() as c:
-            chat = c.execute("SELECT enabled,approval FROM chats WHERE id=? AND kind='group' AND merged_into IS NULL", (chat_id,)).fetchone()
-            auto_enable = bool(auto_enable and chat and chat['enabled'] and chat['approval'] == 'approved')
             principal = None
             reason = "sender_unknown"
             if normalized:
@@ -39,25 +37,13 @@ class Members:
                         aliases[0][0]
                         if aliases
                         else Permissions._observe(
-                            c, "group_member", chat_id, name, status="active" if auto_enable else "pending"
+                            c, "group_member", chat_id, name, status="pending"
                         )
                     )
                     c.execute(
                         "INSERT OR IGNORE INTO principal_aliases(chat_id,principal_id,name,normalized_name) VALUES(?,?,?,?)",
                         (chat_id, principal, name, normalized),
                     )
-                    # Only a previously unreviewed nickname may become ordinary user.
-                    # Explicit bans, disabled/renamed/ambiguous identities never revive.
-                    if auto_enable:
-                        activated = c.execute("""UPDATE principals SET status='active',updated_at=?
-                            WHERE id=? AND status='pending' AND NOT EXISTS
-                            (SELECT 1 FROM access_grants WHERE principal_id=? AND access_level='blocked')""",
-                            (utc_now(), principal, principal)).rowcount
-                        if activated:
-                            record_audit(c, 'member.auto_enabled', source='wechat',
-                                         target_type='principal', target_id=principal)
-                            bump_permission_revision(c)
-                    c.execute('UPDATE principals SET last_seen_at=? WHERE id=?', (utc_now(), principal))
                     reason = c.execute(
                         "SELECT status FROM principals WHERE id=?", (principal,)
                     ).fetchone()[0]
@@ -74,8 +60,7 @@ class Members:
                     ),
                 ),
             )
-        # A deliberately disabled user is normal policy, not a sender parser warning.
-        if reason not in ("active", "disabled"):
+        if reason != "active":
             key = (chat_id, reason)
             count, last = self.counts.get(key, (0, 0))
             count += 1
