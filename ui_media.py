@@ -85,7 +85,7 @@ def exact_row(desktop, message, item):
         sender, _, _ = extract_sender(
             row,
             [message.sender_name],
-            row_prefix_enabled=message.chat in desktop._group_sender_prefix_ready,
+            element_from_point=desktop.desktop.from_point,
         )
         if not sender or normalize_name(sender) != normalize_name(message.sender_name):
             raise UnsupportedMedia("附件群成员核验失败")

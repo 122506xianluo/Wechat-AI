@@ -191,14 +191,8 @@ class Members:
             ]
 
 
-def extract_sender(row, known_names=(), *, row_prefix_enabled=False):
-    """Resolve a group sender from UIA children or WeChat's row-name prefix.
-
-    WeChat 4.1.13.12 may expose ``ChatTextItemView`` as a leaf ListItem. Only
-    treat its leading field as a nickname after the bot has verified that the
-    group's "show member names" setting is enabled. Otherwise a trigger word
-    at the start of a message could be mistaken for a person.
-    """
+def extract_sender(row, known_names=(), *, element_from_point=None):
+    """Read the nickname shown above an incoming group message bubble."""
 
     def walk(node, depth=0):
         if depth > 5:
@@ -238,28 +232,48 @@ def extract_sender(row, known_names=(), *, row_prefix_enabled=False):
                 return text(ordered[0]), "inline_nickname", 0.9
         except Exception:
             pass
+    # WeChat 4.1.13.12 can paint the visible nickname without exposing it as a
+    # Control View child. UIA hit-testing at the actual label position can still
+    # return that Text element. This is read-only and never clicks the avatar.
+    if element_from_point is not None:
+        try:
+            box = row.rectangle()
+            width, height = box.right - box.left, box.bottom - box.top
+            x_start = box.left + 48
+            x_stop = box.left + min(max(120, width // 2), 360)
+            # Stay above the bubble text; the nickname occupies the first band.
+            y_stop = box.top + min(max(14, height // 3), 22)
+            hits = {}
+            for y in range(box.top + 3, y_stop + 1, 7):
+                for x in range(x_start, x_stop + 1, 24):
+                    ctrl = element_from_point(x, y)
+                    value = text(ctrl)
+                    if not value or value == text(row):
+                        continue
+                    control_kind = kind(ctrl)
+                    if control_kind and "text" not in control_kind:
+                        continue
+                    rect = ctrl.rectangle()
+                    if (rect.left < box.left or rect.right > box.right
+                            or rect.top < box.top or rect.bottom > box.bottom):
+                        continue
+                    hits[normalize_name(value)] = (value, rect.top, rect.left)
+            if len(hits) == 1:
+                return next(iter(hits.values()))[0], "uia_nickname_hit_test", 0.95
+            if hits:
+                ordered = sorted(hits.values(), key=lambda item: (item[1], item[2]))
+                if len(ordered) == 1 or ordered[0][1] < ordered[1][1]:
+                    return ordered[0][0], "uia_nickname_hit_test", 0.9
+        except Exception:
+            pass
     full = text(row)
     known = {normalize_name(n): n for n in known_names}
-    if row_prefix_enabled:
-        # Longest-first preserves registered nicknames which contain spaces.
-        for name in sorted(known.values(), key=len, reverse=True):
-            if full.startswith(name) and full[len(name):len(name) + 1].isspace():
-                return name, "row_known_prefix", 0.95
     # Row/content difference only accepted if it is an already registered exact alias.
     for ctrl in texts:
         body = text(ctrl)
         prefix = full[: -len(body)].strip() if body and full.endswith(body) else ""
         if normalize_name(prefix) in known:
             return known[normalize_name(prefix)], "exact_alias_difference", 0.85
-    if row_prefix_enabled:
-        # First observation has no alias to compare against. Here the separator
-        # is meaningful because the corresponding WeChat setting was verified.
-        parts = full.split(None, 1)
-        if len(parts) == 2:
-            candidate, body = parts[0].strip(), parts[1].strip()
-            if (candidate and body and len(candidate) <= 64
-                    and not any(ord(ch) < 32 for ch in candidate)):
-                return candidate, "row_name_prefix", 0.8
     return "", "no_structural_sender", 0.0
 
 
