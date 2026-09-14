@@ -76,6 +76,7 @@ class Engine:
         d = b.permissions.resolve_incoming(
             message.kind, message.chat, message.sender_name, message.direction,
             sender_method=message.sender_method, sender_confidence=message.sender_confidence,
+            sender_features=message.sender_features,
         )
         if not d.allowed:
             logging.getLogger("minimal_wechat_ai").info(
@@ -219,9 +220,10 @@ class Engine:
                 )
             self.jobs.generated(job["id"], answer)
         except Exception as exc:
-            self.jobs.failure(job["id"], exc)
+            error = self.jobs.failure(job["id"], exc)
             logging.getLogger("minimal_wechat_ai").info(
-                "job_generation_failed id=%s type=%s", job["id"][:8], type(exc).__name__
+                "job_generation_failed id=%s type=%s detail=%r",
+                job["id"][:8], type(exc).__name__, error or type(exc).__name__,
             )
 
     def tick(self):

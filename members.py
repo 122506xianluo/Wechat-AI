@@ -61,6 +61,13 @@ class Members:
                     reason = c.execute(
                         "SELECT status FROM principals WHERE id=?", (principal,)
                     ).fetchone()[0]
+            feature_payload = {
+                "shape_hash": sha256(repr(features).encode()).hexdigest(),
+            }
+            if isinstance(features, dict):
+                # Probe diagnostics contain only control types, dimensions and
+                # counters. Message text and nicknames are never included.
+                feature_payload["probe"] = features
             c.execute(
                 "INSERT INTO sender_observations(chat_id,principal_id,method,confidence,reason,features) VALUES(?,?,?,?,?,?)",
                 (
@@ -69,9 +76,7 @@ class Members:
                     method[:40],
                     confidence,
                     reason,
-                    json.dumps(
-                        {"shape_hash": sha256(repr(features).encode()).hexdigest()}
-                    ),
+                    json.dumps(feature_payload, ensure_ascii=True),
                 ),
             )
         # A deliberately disabled user is normal policy, not a sender parser warning.
@@ -81,9 +86,10 @@ class Members:
             count += 1
             if time.monotonic() - last >= 60:
                 logging.getLogger("minimal_wechat_ai").warning(
-                    "sender_skipped chat_id=%s reason=%s count=%s",
+                    "sender_skipped chat_id=%s reason=%s method=%s count=%s",
                     chat_id,
                     reason,
+                    method[:40],
                     count,
                 )
                 count, last = 0, time.monotonic()
@@ -191,8 +197,11 @@ class Members:
             ]
 
 
-def extract_sender(row, known_names=(), *, element_from_point=None):
+def extract_sender(row, known_names=(), *, element_from_point=None, scale=1.0,
+                   diagnostics=None):
     """Read the nickname shown above an incoming group message bubble."""
+
+    probe = diagnostics if isinstance(diagnostics, dict) else {}
 
     def walk(node, depth=0):
         if depth > 5:
@@ -218,10 +227,26 @@ def extract_sender(row, known_names=(), *, element_from_point=None):
         except Exception:
             return ""
 
+    try:
+        row_box = row.rectangle()
+        probe.update(
+            strategy="visible_nickname_band",
+            row_control_type=kind(row) or "unknown",
+            row_width=max(0, row_box.right - row_box.left),
+            row_height=max(0, row_box.bottom - row_box.top),
+            descendant_count=len(controls),
+        )
+    except Exception:
+        probe.update(strategy="visible_nickname_band", row_geometry="unavailable")
+    descendant_types = Counter(kind(c) or "unknown" for c in controls)
+    probe["descendant_types"] = dict(descendant_types.most_common(8))
+
     buttons = {text(c) for c in controls if kind(c) == "button" and text(c)}
     if len(buttons) == 1:
+        probe["result"] = "single_named_button"
         return buttons.pop(), "uia_avatar", 1.0
     if len(buttons) > 1:
+        probe["result"] = "multiple_named_buttons"
         return "", "avatar_conflict", 0.0
     # Inline nickname must be above a separate text bubble, never the sole Text.
     texts = [c for c in controls if kind(c) == "text" and text(c)]
@@ -229,6 +254,7 @@ def extract_sender(row, known_names=(), *, element_from_point=None):
         try:
             ordered = sorted(texts, key=lambda x: x.rectangle().top)
             if ordered[0].rectangle().bottom <= ordered[1].rectangle().top:
+                probe["result"] = "stacked_text_controls"
                 return text(ordered[0]), "inline_nickname", 0.9
         except Exception:
             pass
@@ -239,33 +265,72 @@ def extract_sender(row, known_names=(), *, element_from_point=None):
         try:
             box = row.rectangle()
             width, height = box.right - box.left, box.bottom - box.top
-            x_start = box.left + 48
+            x_start = box.left + max(42, round(42 * max(scale, 1.0)))
             x_stop = box.left + min(max(120, width // 2), 360)
-            # Stay above the bubble text; the nickname occupies the first band.
-            y_stop = box.top + min(max(14, height // 3), 22)
+            # Scan the whole visible nickname band. Candidate text still has to
+            # expose its own compact rectangle, so the message bubble is rejected.
+            y_stop = box.top + min(max(22, round(34 * max(scale, 1.0))), max(1, height // 2))
             hits = {}
-            for y in range(box.top + 3, y_stop + 1, 7):
-                for x in range(x_start, x_stop + 1, 24):
+            row_text = text(row)
+            hit_types = Counter()
+            sampled = row_hits = blank_hits = named_hits = 0
+            for y in range(box.top + 2, y_stop + 1, max(4, round(5 * max(scale, 1.0)))):
+                for x in range(x_start, x_stop + 1, max(6, round(8 * max(scale, 1.0)))):
+                    sampled += 1
                     ctrl = element_from_point(x, y)
                     value = text(ctrl)
-                    if not value or value == text(row):
+                    control_kind = kind(ctrl) or "unknown"
+                    hit_types[control_kind] += 1
+                    try:
+                        rect = ctrl.rectangle()
+                    except Exception:
                         continue
-                    control_kind = kind(ctrl)
+                    if (rect.left <= box.left and rect.top <= box.top
+                            and rect.right >= box.right and rect.bottom >= box.bottom):
+                        row_hits += 1
+                    if not value:
+                        blank_hits += 1
+                        continue
+                    if value.strip() == row_text.strip():
+                        row_hits += 1
+                        continue
                     if control_kind and "text" not in control_kind:
                         continue
-                    rect = ctrl.rectangle()
                     if (rect.left < box.left or rect.right > box.right
                             or rect.top < box.top or rect.bottom > box.bottom):
                         continue
-                    hits[normalize_name(value)] = (value, rect.top, rect.left)
+                    if rect.bottom > y_stop + max(4, round(4 * max(scale, 1.0))):
+                        continue
+                    try:
+                        normalized_value = normalize_name(value)
+                    except ValueError:
+                        continue
+                    named_hits += 1
+                    hits[normalized_value] = (value, rect.top, rect.left)
+            probe.update(
+                sampled_points=sampled,
+                hit_types=dict(hit_types.most_common(8)),
+                row_hits=row_hits,
+                blank_hits=blank_hits,
+                named_hits=named_hits,
+                candidate_count=len(hits),
+            )
             if len(hits) == 1:
+                probe["result"] = "point_text"
                 return next(iter(hits.values()))[0], "uia_nickname_hit_test", 0.95
             if hits:
                 ordered = sorted(hits.values(), key=lambda item: (item[1], item[2]))
                 if len(ordered) == 1 or ordered[0][1] < ordered[1][1]:
+                    probe["result"] = "topmost_point_text"
                     return ordered[0][0], "uia_nickname_hit_test", 0.9
-        except Exception:
-            pass
+                probe["result"] = "point_text_conflict"
+            elif row_hits and row_hits >= max(1, sampled - blank_hits):
+                probe["result"] = "point_row_only"
+            else:
+                probe["result"] = "point_no_named_text"
+        except Exception as exc:
+            probe["result"] = "point_probe_error"
+            probe["probe_error"] = type(exc).__name__
     full = text(row)
     known = {normalize_name(n): n for n in known_names}
     # Row/content difference only accepted if it is an already registered exact alias.
@@ -273,8 +338,10 @@ def extract_sender(row, known_names=(), *, element_from_point=None):
         body = text(ctrl)
         prefix = full[: -len(body)].strip() if body and full.endswith(body) else ""
         if normalize_name(prefix) in known:
+            probe["result"] = "registered_alias_difference"
             return known[normalize_name(prefix)], "exact_alias_difference", 0.85
-    return "", "no_structural_sender", 0.0
+    result = probe.get("result", "no_structural_sender")
+    return "", "uia_" + result[:36], 0.0
 
 
 def strip_sender_prefix(text, sender):

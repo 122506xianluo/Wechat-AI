@@ -134,7 +134,8 @@ class Permissions:
             return self._observe(connection, "group_member", chat_id, name, status="pending")
 
     def resolve_incoming(self, kind: str, name: str, sender_name: str,
-                         direction: str, *, sender_method="uia_avatar", sender_confidence=1.0) -> AccessDecision:
+                         direction: str, *, sender_method="uia_avatar", sender_confidence=1.0,
+                         sender_features=()) -> AccessDecision:
         if direction != "incoming":
             return AccessDecision(None, None, "blocked", False, "not_incoming")
         # Do not create chats here: unknown targets are not authorized by identity.
@@ -154,7 +155,8 @@ class Permissions:
             if principal_id is None:
                 self.members = Members(self.storage)
             principal_id = self.members.observe(chat_id, sender_name, sender_method,
-                                               sender_confidence, auto_enable=True)
+                                               sender_confidence, sender_features,
+                                               auto_enable=True)
             if principal_id is None:
                 return AccessDecision(None, chat_id, "blocked", False,
                                       "sender_ambiguous" if normalized_sender else "sender_unknown")

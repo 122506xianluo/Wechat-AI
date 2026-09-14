@@ -1,6 +1,7 @@
 """Durable ordered jobs; all transitions atomic, no network inside transactions."""
 
 import json
+import re
 import time
 import uuid
 from audit import record_audit
@@ -8,6 +9,32 @@ from roles import require_manager
 from storage import utc_now
 
 ACTIVE = ("queued", "processing", "retry_wait", "ready_to_send", "sending", "unknown")
+
+
+def safe_error_detail(exc):
+    """Return useful failure detail without leaking credentials into logs/SQLite."""
+    cause = exc
+    while cause.__cause__ is not None:
+        cause = cause.__cause__
+    status = getattr(getattr(cause, "response", None), "status_code", None)
+    detail = " ".join(str(cause).split())
+    detail = re.sub(
+        r"(?i)(authorization\s*[:=]\s*)(?:bearer\s+)?[^\s,;&]+",
+        r"\1[REDACTED]",
+        detail,
+    )
+    detail = re.sub(
+        r"(?i)((?:api[_-]?key|access[_-]?token|secret)[\"']?\s*[:=]\s*)"
+        r"[\"']?[^\s,;&\"']+",
+        r"\1[REDACTED]",
+        detail,
+    )
+    detail = re.sub(r"(?i)bearer\s+[^\s,;]+", "Bearer [REDACTED]", detail)
+    detail = re.sub(r"\bsk-[A-Za-z0-9_-]{8,}\b", "[REDACTED]", detail)
+    result = type(cause).__name__ + (" HTTP " + str(status) if status else "")
+    if detail and detail != result:
+        result += ": " + detail[:240]
+    return result
 
 
 class JobQueue:
@@ -205,7 +232,7 @@ class JobQueue:
                     )
                 except (ValueError, TypeError):
                     pass
-            error = type(cause).__name__ + (" HTTP " + str(status) if status else "")
+            error = safe_error_detail(exc)
             c.execute(
                 "UPDATE message_jobs SET state=?,next_attempt_at=?,lease_owner=NULL,lease_until=NULL,last_error=?,updated_at=? WHERE id=?",
                 (state, time.time() + delay, error, time.time(), jid),
@@ -220,6 +247,7 @@ class JobQueue:
                     "UPDATE messages SET status='failed',error_message=? WHERE id=?",
                     (error, row["inbound_message_id"]),
                 )
+        return error
 
     def ready(self):
         with self.storage._connection() as c:

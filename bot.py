@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 import sys
 import time
+import unicodedata
 from urllib.parse import urlparse
 import uuid
 
@@ -145,6 +146,7 @@ class Message:
     sender_confidence: float = 1.0
     content_type: str = "text"
     attachments: list[dict] = field(default_factory=list)
+    sender_features: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -251,6 +253,12 @@ def _walk_children(ctrl, depth: int = 0, max_depth: int = 3):
 
 def _normalized_wechat_name(value: str) -> str:
     return re.sub(r"[\s\u2005]+", "", value or "")
+
+
+def _normalized_title(value: str) -> str:
+    """Normalize display-only differences emitted by separate WeChat controls."""
+    value = unicodedata.normalize("NFC", value or "").strip()
+    return re.sub(r"[\u00a0\u2005\u200b\ufeff\ufe0e\ufe0f]", "", value)
 
 
 def group_sender_name(row) -> str:
@@ -526,18 +534,20 @@ class WeChatDesktop:
         # Always click the actual list item, not a name-only shortcut.
         matches[session.occurrence].click_input()
         time.sleep(.25)
-        deadline = time.monotonic() + 1.5
+        deadline = time.monotonic() + 3.0
+        expected_title = _normalized_title(session.name)
         matched_title = False
-        last_kind = None
+        last_name, last_kind = "", None
         while True:
             self.require_foreground()
             try:
                 name, kind = self.current()
             except BotError:
                 name, kind = "", None
-            if name == session.name:
+            last_name = name
+            last_kind = kind
+            if _normalized_title(name) == expected_title:
                 matched_title = True
-                last_kind = kind
                 # 标题、聊天类型和输入框可能分阶段加载，必须一起就绪后
                 # 才算切换成功，不能在标题刚出现时立即判定失败。
                 if kind in ("private", "group") and self._edit(required=False) is not None:
@@ -550,7 +560,13 @@ class WeChatDesktop:
                     raise BotError("当前页面不是普通私聊或群聊")
                 if matched_title:
                     raise BotError("切换聊天后输入框不可读")
-                raise BotError("切换聊天后标题核验失败")
+                observed = _normalized_title(last_name)
+                fingerprint = sha256(observed.encode()).hexdigest()[:10] if observed else "empty"
+                raise BotError(
+                    "切换聊天后标题核验失败"
+                    f"(observed_len={len(observed)} observed_hash={fingerprint} "
+                    f"observed_kind={last_kind or 'unknown'})"
+                )
             time.sleep(.05)
 
     def rows(self):
@@ -618,7 +634,7 @@ class WeChatDesktop:
                 self.require_foreground()
                 text = row.window_text()
                 source_key = sha256((key + "|" + "|".join(tokens[max(0,index-8):index+1]) + "|" + str(index)).encode()).hexdigest()
-                method, confidence = "uia_avatar", 1.0
+                method, confidence, sender_features = "uia_avatar", 1.0, {}
                 try:
                     direction = row_direction(row, self.scale, kind, self.cfg.bot_names)
                     # Commands require UIA evidence, not a trigger or screenshot.
@@ -628,7 +644,8 @@ class WeChatDesktop:
                         with self.chats.storage._connection() as connection:
                             aliases = [r[0] for r in connection.execute("SELECT name FROM principal_aliases WHERE chat_id=? AND status='active'", (chat["id"],))]
                         sender, method, confidence = extract_sender(
-                            row, aliases, element_from_point=self.desktop.from_point
+                            row, aliases, element_from_point=self.desktop.from_point,
+                            scale=self.scale, diagnostics=sender_features,
                         )
                         if sender:
                             text = strip_sender_prefix(text, sender)
@@ -636,6 +653,7 @@ class WeChatDesktop:
                         sender = session.name
                 except Exception:
                     direction, verified, sender = "unknown", False, ""
+                    sender_features = {"probe_error": "sender_pipeline_exception"}
                 self.require_foreground()
                 if direction != "incoming":
                     if direction == "unknown":
@@ -645,6 +663,7 @@ class WeChatDesktop:
                     uuid.uuid4().hex, session.name, kind, text, source_key=source_key,
                     sender_name=sender, direction=direction, direction_verified=verified,
                     sender_method=method, sender_confidence=confidence,
+                    sender_features=sender_features,
                     content_type=attachment["content_type"] if attachment else "text",
                     attachments=[attachment] if attachment else [])
                 messages.append(candidate)
