@@ -141,6 +141,8 @@ class Message:
     sender_name: str = ""
     direction: str = "unknown"
     direction_verified: bool = False
+    sender_method: str = "uia_avatar"
+    sender_confidence: float = 1.0
     content_type: str = "text"
     attachments: list[dict] = field(default_factory=list)
 
@@ -572,7 +574,13 @@ class WeChatDesktop:
             raise BotError("尚未建立消息基线")
         self.require_foreground()
         messages, seen = [], []
+        monitored_names = self.chats.monitored_names()
         for session in self.sessions():
+            # Do not click through every visible WeChat conversation. Private
+            # chats are manually added, and groups must be explicitly added from
+            # the currently open group before the bot may monitor them.
+            if session.name not in monitored_names:
+                continue
             try:
                 kind = self.activate(session)
             except FocusLost:
@@ -587,8 +595,12 @@ class WeChatDesktop:
                 key: value for key, value in getattr(self, "_chat_skip_log", {}).items()
                 if key[:2] != prefix
             }
+            if not self.chats.allowed(kind, session.name):
+                # A private chat and a group may share a display name. Activating
+                # the name is not authorization; the verified type must match too.
+                continue
             seen.append((kind, session.name))
-            chat = self.chats.discover(kind, session.name, session.key)
+            chat = self.chats.get(kind, session.name)
             key = str(chat['id']) + ':' + str(session.occurrence)
             rows = self.rows()
             tokens = [row_token(r.class_name(), r.window_text()) for r in rows]
@@ -597,8 +609,6 @@ class WeChatDesktop:
                 self.tracker.snapshots.pop(key, None)
                 self.approval_baselines[key] = revision
             indices = self.tracker.update(key, tokens)
-            if not self.chats.allowed(kind, session.name):
-                continue
             for index in indices:
                 row = rows[index]
                 from ui_media import descriptor
@@ -608,6 +618,7 @@ class WeChatDesktop:
                 self.require_foreground()
                 text = row.window_text()
                 source_key = sha256((key + "|" + "|".join(tokens[max(0,index-8):index+1]) + "|" + str(index)).encode()).hexdigest()
+                method, confidence = "uia_avatar", 1.0
                 try:
                     direction = row_direction(row, self.scale, kind, self.cfg.bot_names)
                     # Commands require UIA evidence, not a trigger or screenshot.
@@ -617,10 +628,6 @@ class WeChatDesktop:
                         with self.chats.storage._connection() as connection:
                             aliases = [r[0] for r in connection.execute("SELECT name FROM principal_aliases WHERE chat_id=? AND status='active'", (chat["id"],))]
                         sender, method, confidence = extract_sender(row, aliases)
-                        if not hasattr(self, "members"):
-                            from members import Members
-                            self.members = Members(self.chats.storage)
-                        self.members.observe(chat["id"], sender, method, confidence)
                     else:
                         sender = session.name
                 except Exception:
@@ -633,6 +640,7 @@ class WeChatDesktop:
                 candidate = Message(
                     uuid.uuid4().hex, session.name, kind, text, source_key=source_key,
                     sender_name=sender, direction=direction, direction_verified=verified,
+                    sender_method=method, sender_confidence=confidence,
                     content_type=attachment["content_type"] if attachment else "text",
                     attachments=[attachment] if attachment else [])
                 messages.append(candidate)
