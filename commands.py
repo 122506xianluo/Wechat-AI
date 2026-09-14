@@ -7,7 +7,7 @@ import re
 from permissions import AccessDecision, Permissions
 from roles import Roles
 
-HELP = "可用命令：/ai help、/ai status、/ai reset、/ai role、/ai role list、/ai role use <角色名>。群内 status 仅管理员可用；reset 仅清空自己的独立上下文。"
+HELP = "可用命令：/ai help、/ai status、/ai reset、/ai role、/ai role list、/ai role use <角色名>。status 只查看自己的状态；reset 仅清空自己的独立上下文。"
 
 
 @dataclass(frozen=True)
@@ -54,10 +54,10 @@ class Commands:
         if command.name == "help":
             answer = HELP
         elif command.name == "status":
-            if kind == "group" and current.access_level != "admin":
-                self.permissions.audit_command(current, command.name, "denied")
-                return None
-            answer = f"当前权限：{current.access_level}；本会话已启用；上下文来源：SQLite。"
+            with self.permissions.storage._connection() as c:
+                user = c.execute('SELECT reply_quota,request_count FROM principals WHERE id=?', (current.principal_id,)).fetchone()
+            quota = "不限" if user['reply_quota'] is None else str(user['reply_quota'])
+            answer = f"AI 已启用；剩余调用次数：{quota}；已接收 AI 请求：{user['request_count']}；上下文来源：SQLite。"
         elif command.name == "role":
             answer = "当前角色：" + self.roles.resolve(current.chat_id, current.principal_id)["name"]
         elif command.name == "role_list":
@@ -66,7 +66,7 @@ class Commands:
             role = next((r for r in self.roles.list() if r["name"] == command.argument), None)
             if not role:
                 return "角色不存在，请用 /ai role list 查看。"
-            target = None if kind == "group" and current.access_level == "admin" else current.principal_id
+            target = current.principal_id
             try:
                 self.roles.bind(role["id"], current.chat_id, target, current.as_actor(), self_select=True)
             except ValueError:

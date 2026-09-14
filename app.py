@@ -17,11 +17,10 @@ import webbrowser
 from urllib.parse import urlsplit
 
 import httpx
-from flask import Flask, g, jsonify, render_template, request, redirect
+from flask import Flask, g, jsonify, render_template, request
 
 from bot import Config, LLMSettings
-from permissions import PermissionDenied, Permissions
-from auth import Auth
+from permissions import LOCAL_OWNER, PermissionDenied, Permissions
 from auth_web import register_auth
 from storage import Storage
 from admin_api import register_admin
@@ -251,11 +250,10 @@ def run_check():
 
 @app.before_request
 def enforce_local_owner():
-    """Temporary stage-3 owner, NOT a substitute for stage-8 account login.
+    """Passwordless local console; loopback, Host, Origin and CSRF remain mandatory.
 
-    Reject DNS rebinding, cross-site requests and non-loopback callers even when
-    a reverse proxy is accidentally placed in front of the local Flask server.
-    Forwarded/X-Forwarded headers never confer authority.
+    This is local desktop administration, not a multi-account web service.
+    Never trust forwarded headers or allow remote network binding.
     """
     try:
         host = urlsplit(request.host_url)
@@ -272,21 +270,15 @@ def enforce_local_owner():
     if (origin is not None and origin != request.host_url.rstrip("/")) or request.headers.get(
             "Sec-Fetch-Site") == "cross-site":
         return fail("不允许跨站控制本机机器人", 403)
-    public = request.path in ('/login','/api/v1/auth/status','/api/v1/auth/init','/api/v1/auth/login','/api/v1/auth/recover') or request.path.startswith('/static/')
-    session = None if public else Auth(get_storage()).session(request.cookies.get('wechat_ai_session'))
-    if not public and not session:
-        return fail("请先登录",401) if request.path.startswith('/api/') else redirect('/login')
-    g.csrf = session[1] if session else app.config['LOCAL_CSRF_TOKEN']
-    if session:
-        g.actor,g.account_id = session[0],session[2]
+    g.csrf = app.config['LOCAL_CSRF_TOKEN']
+    g.actor = LOCAL_OWNER
+    g.account_id = None
     if request.method not in ('GET','HEAD','OPTIONS'):
         token=request.headers.get('X-CSRF-Token','')
         if not secrets.compare_digest(token.encode(),g.csrf.encode()):
             return fail('页面验证已过期，请刷新',403)
         if not request.is_json or not isinstance(request.get_json(silent=True),dict):
             return fail('请求必须是 JSON 对象',400)
-    if session and g.actor.access_level!='owner' and request.path in ('/api/save','/api/test','/api/v1/test','/api/v1/settings','/api/v1/capabilities/test'):
-        return fail('配置和密钥仅 owner 可修改',403)
 
 
 @app.after_request
@@ -322,7 +314,7 @@ def api_principals():
             raise ValueError("搜索文本过长")
         service = Permissions(get_storage())
         return jsonify(ok=True, principals=service.list_principals(query),
-                       revision=service.revision(), temporary_local_owner=False)
+                       revision=service.revision(), local_mode=True, temporary_local_owner=False)
     except Exception as exc:
         return management_error(exc)
 
@@ -500,7 +492,7 @@ def api_test():
 @app.post("/api/start")
 def api_start():
     if g.actor.access_level != "owner":
-        return fail("启动并保存配置仅 owner 可操作", 403)
+        return fail("启动并保存配置仅允许本机控制台操作", 403)
     if bot_running():
         return fail("已经在运行")
     data = request.get_json(silent=True) or {}

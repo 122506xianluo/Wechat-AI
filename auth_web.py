@@ -1,108 +1,35 @@
-"""Authentication routes. Loopback/origin/CSRF enforced centrally by app."""
+"""Compatibility routes for the passwordless, loopback-only console.
 
-from flask import Blueprint, g, jsonify, request, render_template, make_response
-from auth import Auth
+Existing account records remain in SQLite for backup compatibility, but confer
+no privileges. The application's central local/CSRF guard protects every route.
+"""
+from flask import Blueprint, g, jsonify, redirect
 
 
 def register_auth(app, storage, error):
     api = Blueprint("auth", __name__)
 
-    @api.errorhandler(ValueError)
-    def invalid(exc):
-        return error(exc)
-
     @api.get("/login")
     def login_page():
-        return render_template(
-            "login.html",
-            csrf_token=app.config["LOCAL_CSRF_TOKEN"],
-            initialized=Auth(storage()).initialized(),
-        )
+        return redirect("/")
 
     @api.get("/api/v1/auth/status")
     def status():
-        s = Auth(storage()).session(request.cookies.get("wechat_ai_session"))
-        return jsonify(
-            ok=True,
-            initialized=Auth(storage()).initialized(),
-            authenticated=bool(s),
-            level=s[0].access_level if s else None,
-        )
-
-    @api.post("/api/v1/auth/init")
-    def init():
-        d = request.get_json()
-        auth = Auth(storage())
-        recovery = auth.create(d.get("username"), d.get("password"))
-
-        # Initialization is also the first login.  Create the same authenticated
-        # session as the normal login endpoint so the user can enter the console
-        # after saving the one-time recovery code without typing credentials again.
-        token, csrf = auth.login(
-            d.get("username"), d.get("password"), request.remote_addr
-        )
-        response = make_response(
-            jsonify(
-                ok=True,
-                recovery_code=recovery,
-                csrf_token=csrf,
-                authenticated=True,
-            )
-        )
-        response.set_cookie(
-            "wechat_ai_session",
-            token,
-            max_age=43200,
-            httponly=True,
-            samesite="Strict",
-            secure=False,
-        )
-        return response
-
-    @api.post("/api/v1/auth/login")
-    def login():
-        d = request.get_json()
-        token, csrf = Auth(storage()).login(
-            d.get("username"), d.get("password"), request.remote_addr
-        )
-        r = make_response(jsonify(ok=True, csrf_token=csrf))
-        r.set_cookie(
-            "wechat_ai_session",
-            token,
-            max_age=43200,
-            httponly=True,
-            samesite="Strict",
-            secure=False,
-        )
-        return r
+        return jsonify(ok=True, initialized=True, authenticated=True,
+                       local_mode=True, level="local", csrf_token=g.csrf)
 
     @api.post("/api/v1/auth/logout")
     def logout():
-        Auth(storage()).logout(request.cookies.get("wechat_ai_session"))
-        r = make_response(jsonify(ok=True))
-        r.delete_cookie("wechat_ai_session", httponly=True, samesite="Strict")
-        return r
+        response = jsonify(ok=True, local_mode=True)
+        response.delete_cookie("wechat_ai_session", httponly=True, samesite="Strict")
+        return response
 
+    @api.post("/api/v1/auth/init")
+    @api.post("/api/v1/auth/login")
     @api.post("/api/v1/auth/password")
-    def password():
-        d = request.get_json()
-        Auth(storage()).change_password(
-            g.account_id, d.get("current"), d.get("password"), g.actor
-        )
-        return jsonify(ok=True)
-
     @api.post("/api/v1/auth/recover")
-    def recover():
-        d = request.get_json()
-        code = Auth(storage()).recover_password(
-            d.get("username"), d.get("code"), d.get("password"), request.remote_addr
-        )
-        return jsonify(ok=True, recovery_code=code)
-
     @api.post("/api/v1/auth/accounts")
-    def create_admin():
-        d = request.get_json()
-        Auth(storage()).create(d.get("username"), d.get("password"), g.actor)
-        return jsonify(ok=True)
+    def retired():
+        return jsonify(ok=False, error="本地控制台已免登录，请刷新页面直接使用。"), 410
 
     app.register_blueprint(api)

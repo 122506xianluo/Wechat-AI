@@ -1,9 +1,8 @@
 """Identity and access policy, independent of WeChat UI and model clients.
 
-Stage 3 identities are scoped to a verified UI chat. A group nickname is NOT a
-stable WeChat ID: newly observed names require explicit local approval. Rich
-alias/collision resolution will be added in stage 6; never infer privileges from
-message text or automatically transfer permissions to a renamed member.
+Identities are scoped to a verified chat. New group nicknames receive only
+ordinary AI access on a valid trigger; unknown/colliding names fail closed.
+Administrative operations belong to the loopback-only web console.
 """
 from __future__ import annotations
 
@@ -30,8 +29,8 @@ class Actor:
     chat_id: int | None = None
 
 
-# Never constructed from request JSON. Stage 8 replaces this loopback-only actor
-# with the authenticated web account; no WeChat principal can claim it.
+# Never constructed from request JSON. Only the loopback web guard sets this
+# actor; no WeChat nickname can claim desktop administration.
 LOCAL_OWNER = Actor(None, "owner", "web")
 
 
@@ -80,6 +79,8 @@ def _decision(connection, principal_id: int, chat_id: int | None) -> AccessDecis
     scoped = next((row["access_level"] for row in grants if row["chat_id"] is not None), None)
     global_level = next((row["access_level"] for row in grants if row["chat_id"] is None), "user")
     level = scoped or global_level
+    if principal['kind'] in ('private_user', 'group_member') and level == 'admin':
+        level = 'user'
     if level == "owner" and principal["kind"] != "web_account":
         return AccessDecision(principal_id, chat_id, "blocked", False, "invalid_owner")
     return AccessDecision(principal_id, chat_id, level, True, "allowed")
@@ -133,7 +134,7 @@ class Permissions:
             return self._observe(connection, "group_member", chat_id, name, status="pending")
 
     def resolve_incoming(self, kind: str, name: str, sender_name: str,
-                         direction: str) -> AccessDecision:
+                         direction: str, *, sender_method="uia_avatar", sender_confidence=1.0) -> AccessDecision:
         if direction != "incoming":
             return AccessDecision(None, None, "blocked", False, "not_incoming")
         # Do not create chats here: unknown targets are not authorized by identity.
@@ -148,15 +149,15 @@ class Permissions:
                 normalized_sender = normalize_name(sender_name)
             except ValueError:
                 return AccessDecision(None, chat_id, "blocked", False, "sender_invalid")
-            if not normalized_sender:
-                return AccessDecision(None, chat_id, "blocked", False, "sender_unknown")
             from members import Members
             principal_id = getattr(self, "members", None)
             if principal_id is None:
                 self.members = Members(self.storage)
-            principal_id = self.members.observe(chat_id, sender_name)
+            principal_id = self.members.observe(chat_id, sender_name, sender_method,
+                                               sender_confidence, auto_enable=True)
             if principal_id is None:
-                return AccessDecision(None, chat_id, "blocked", False, "sender_ambiguous")
+                return AccessDecision(None, chat_id, "blocked", False,
+                                      "sender_ambiguous" if normalized_sender else "sender_unknown")
         else:
             with self.storage._connection() as connection:
                 row = connection.execute(
@@ -200,6 +201,8 @@ class Permissions:
             raise ValueError("权限等级无效")
         with self.storage.transaction() as connection:
             target = _principal(connection, principal_id)
+            if target['kind'] in ('private_user', 'group_member') and level == 'admin':
+                raise PermissionDenied("微信用户只区分允许/停用，请在所有用户列表管理")
             if level == "owner" and (target["kind"] != "web_account" or chat_id is not None):
                 raise PermissionDenied("微信身份不能成为 owner")
             if chat_id is not None:

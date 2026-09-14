@@ -182,3 +182,15 @@ def v10(c):
             "CREATE TABLE tool_runs(id INTEGER PRIMARY KEY,job_id TEXT REFERENCES message_jobs(id) ON DELETE SET NULL,principal_id INTEGER REFERENCES principals(id),scope_id INTEGER REFERENCES conversation_scopes(id),tool_name TEXT NOT NULL,argument_summary TEXT NOT NULL,status TEXT NOT NULL,duration_ms INTEGER NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP)",
         ),
     )
+
+
+def v11(c):
+    """Simple user allowances. Keep old accounts/history; do not widen chat access."""
+    statements(c, (
+        "ALTER TABLE principals ADD COLUMN reply_quota INTEGER CHECK(reply_quota IS NULL OR reply_quota>=0)",
+        "ALTER TABLE principals ADD COLUMN request_count INTEGER NOT NULL DEFAULT 0 CHECK(request_count>=0)",
+    ))
+    # WeChat names can use AI but no longer confer administrative powers.
+    c.execute("UPDATE access_grants SET access_level='user' WHERE access_level='admin' "
+              "AND principal_id IN (SELECT id FROM principals WHERE kind IN ('private_user','group_member'))")
+    c.execute("UPDATE schema_meta SET value=CAST(value AS INTEGER)+1 WHERE key='permission_revision'")
