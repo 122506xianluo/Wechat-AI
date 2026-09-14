@@ -419,6 +419,7 @@ class WeChatDesktop:
         self.known = set()
         self.ready = False
         self._chat_skip_log = {}
+        self._unsupported_sessions = set()
         try:
             import ctypes
             self.scale = ctypes.windll.user32.GetDpiForWindow(self.hwnd) / 96 or 1.0
@@ -455,6 +456,8 @@ class WeChatDesktop:
                 continue
             index = counts.get(key, 0)
             counts[key] = index + 1
+            if (key, index) in getattr(self, "_unsupported_sessions", set()):
+                continue
             result.append(Session(key, name, index))
         return result
 
@@ -498,16 +501,21 @@ class WeChatDesktop:
             kind = "other"
         return name, kind
 
-    def _edit(self):
+    def _edit(self, *, required=True):
         edit = self.window.child_window(**self.Edits.CurrentChatEdit)
         if not edit.exists(timeout=.2):
-            raise BotError("输入框不可读")
+            if required:
+                raise BotError("输入框不可读")
+            return None
         return edit
 
     def activate(self, session: Session) -> str:
         self.require_foreground()
-        edit = self._edit()
-        if edit.window_text() != "":
+        # 微信启动后可能还没有选中任何聊天，此时输入框尚未创建。
+        # 先尝试读取已有输入框保护人工草稿；没有输入框不能直接判定
+        # 会话无效，必须先点击目标会话，再在目标页面核验输入框。
+        edit = self._edit(required=False)
+        if edit is not None and edit.window_text() != "":
             raise BotError("检测到输入框草稿；不会覆盖人工输入")
         items = self.window.child_window(**self.Main.SessionList).children(control_type="ListItem")
         matches = [item for item in items if item.automation_id() == session.key]
@@ -517,12 +525,29 @@ class WeChatDesktop:
         matches[session.occurrence].click_input()
         time.sleep(.25)
         deadline = time.monotonic() + 1.5
+        matched_title = False
+        last_kind = None
         while True:
             self.require_foreground()
-            name, kind = self.current()
+            try:
+                name, kind = self.current()
+            except BotError:
+                name, kind = "", None
             if name == session.name:
-                return kind
+                matched_title = True
+                last_kind = kind
+                # 标题、聊天类型和输入框可能分阶段加载，必须一起就绪后
+                # 才算切换成功，不能在标题刚出现时立即判定失败。
+                if kind in ("private", "group") and self._edit(required=False) is not None:
+                    return kind
             if time.monotonic() >= deadline:
+                if matched_title and last_kind == "other":
+                    unsupported = getattr(self, "_unsupported_sessions", set())
+                    unsupported.add((session.key, session.occurrence))
+                    self._unsupported_sessions = unsupported
+                    raise BotError("当前页面不是普通私聊或群聊")
+                if matched_title:
+                    raise BotError("切换聊天后输入框不可读")
                 raise BotError("切换聊天后标题核验失败")
             time.sleep(.05)
 

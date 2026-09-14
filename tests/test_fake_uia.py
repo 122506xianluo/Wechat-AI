@@ -3,7 +3,7 @@ import sys
 
 import pytest
 
-from bot import (Config, Message, Policy, SendUncertain, Session, SnapshotTracker,
+from bot import (BotError, Config, Message, Policy, SendUncertain, Session, SnapshotTracker,
                  WeChatDesktop, group_sender_name, row_direction, row_token, uia_row_direction)
 from tests.fakes import FakeControl
 
@@ -19,6 +19,7 @@ def test_sessions_ignore_aggregate_entries():
     items = [
         FakeControl(automation_id="session_item_服务号", kind="ListItem"),
         FakeControl(automation_id="session_item_公众号", kind="ListItem"),
+        FakeControl(automation_id="session_item_腾讯新闻", kind="ListItem"),
         FakeControl(automation_id="session_item_Friend", kind="ListItem"),
     ]
     session_list = SimpleNamespace(children=lambda **_: items)
@@ -27,6 +28,7 @@ def test_sessions_ignore_aggregate_entries():
     desktop.Texts = SimpleNamespace(
         NotCare={"session_item_服务号", "session_item_公众号"}
     )
+    desktop._unsupported_sessions = {("session_item_腾讯新闻", 0)}
 
     assert desktop.sessions() == [Session("session_item_Friend", "Friend", 0)]
 
@@ -44,6 +46,72 @@ def test_chat_skip_log_is_detailed_and_throttled(caplog):
     assert len(records) == 1
     assert "chat='Friend'" in records[0].getMessage()
     assert "reason=title_unverified" in records[0].getMessage()
+
+
+def test_activate_clicks_chat_before_requiring_input(monkeypatch):
+    desktop = WeChatDesktop.__new__(WeChatDesktop)
+    selected = {"value": False}
+    session = Session("session_item_Friend", "Friend")
+
+    item = SimpleNamespace(
+        automation_id=lambda: session.key,
+        click_input=lambda: selected.update(value=True),
+    )
+    session_list = SimpleNamespace(children=lambda **_: [item])
+    desktop.window = SimpleNamespace(
+        child_window=lambda **_: session_list
+    )
+    desktop.Main = SimpleNamespace(SessionList={"title": "会话"})
+    desktop.require_foreground = lambda: None
+
+    def current():
+        if not selected["value"]:
+            raise BotError("当前聊天标题不可读")
+        return "Friend", "private"
+
+    def edit(*, required=True):
+        if not selected["value"]:
+            if required:
+                raise BotError("输入框不可读")
+            return None
+        return SimpleNamespace(window_text=lambda: "")
+
+    desktop.current = current
+    desktop._edit = edit
+    monkeypatch.setattr("bot.time.sleep", lambda _: None)
+
+    assert desktop.activate(session) == "private"
+
+
+def test_activate_waits_for_chat_controls_to_finish_loading(monkeypatch):
+    desktop = WeChatDesktop.__new__(WeChatDesktop)
+    selected = {"value": False}
+    current_calls = {"value": 0}
+    session = Session("session_item_Friend", "Friend")
+    item = SimpleNamespace(
+        automation_id=lambda: session.key,
+        click_input=lambda: selected.update(value=True),
+    )
+    session_list = SimpleNamespace(children=lambda **_: [item])
+    desktop.window = SimpleNamespace(child_window=lambda **_: session_list)
+    desktop.Main = SimpleNamespace(SessionList={"title": "会话"})
+    desktop.require_foreground = lambda: None
+
+    def current():
+        current_calls["value"] += 1
+        kind = "other" if current_calls["value"] == 1 else "private"
+        return "Friend", kind
+
+    def edit(*, required=True):
+        if not selected["value"] or current_calls["value"] < 2:
+            return None
+        return SimpleNamespace(window_text=lambda: "")
+
+    desktop.current = current
+    desktop._edit = edit
+    monkeypatch.setattr("bot.time.sleep", lambda _: None)
+
+    assert desktop.activate(session) == "private"
 
 
 def test_avatar_nested_name_and_geometry():
