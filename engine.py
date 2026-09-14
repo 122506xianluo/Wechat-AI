@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, replace
 import json
 import logging
+import time
 from commands import parse_command
 from job_queue import JobQueue
 
@@ -16,6 +17,21 @@ class Engine:
         self.pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="model-worker")
         self.futures = set()
         self.index_future = None
+        self.send_deferrals = {}
+
+    def log_send_deferred(self, job_id, exc):
+        detail = " ".join(str(exc).split())[:240] or type(exc).__name__
+        key = (job_id, type(exc).__name__, detail)
+        now = time.monotonic()
+        last, suppressed = self.send_deferrals.get(key, (0.0, 0))
+        if now - last < 60.0:
+            self.send_deferrals[key] = (last, suppressed + 1)
+            return
+        logging.getLogger("minimal_wechat_ai").info(
+            "send_deferred id=%s reason=%s detail=%r suppressed=%d",
+            job_id[:8], type(exc).__name__, detail, suppressed,
+        )
+        self.send_deferrals[key] = (now, 0)
 
     def observe_batch(self, messages):
         # Associate media only within one consecutive same-sender run of this poll.
@@ -246,7 +262,7 @@ class Engine:
         self.send_ready()
 
     def send_ready(self, only=None):
-        from bot import Message, FocusLost, SendUncertain
+        from bot import Message, BotError, FocusLost, SendUncertain
 
         b = self.bot
         for job in self.jobs.ready():
@@ -314,6 +330,14 @@ class Engine:
                     self.jobs.finish(job["id"], "unknown", "focus_after_sending")
                     raise SendUncertain("发送阶段失焦，请人工核对")
                 raise
+            except BotError as exc:
+                # BotError before before_fill cannot have touched the input box.
+                # Keep the durable job ready and let later polls retry safely.
+                if self.jobs.get(job["id"])["entered_sending"]:
+                    self.jobs.finish(job["id"], "unknown", type(exc).__name__)
+                    raise SendUncertain("发送结果不明；任务不会自动重发") from exc
+                self.log_send_deferred(job["id"], exc)
+                continue
             except Exception as exc:
                 state = (
                     "unknown"

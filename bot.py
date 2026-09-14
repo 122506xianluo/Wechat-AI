@@ -511,6 +511,13 @@ class WeChatDesktop:
             kind = "other"
         return name, kind
 
+    def current_matches(self, name: str, kind: str) -> bool:
+        current_name, current_kind = self.current()
+        return (
+            current_kind == kind
+            and _normalized_title(current_name) == _normalized_title(name)
+        )
+
     def _edit(self, *, required=True):
         edit = self.window.child_window(**self.Edits.CurrentChatEdit)
         if not edit.exists(timeout=.2):
@@ -677,18 +684,32 @@ class WeChatDesktop:
     def send(self, message: Message, answer: str, *, before_fill=None):
         self.require_foreground()
         matches = [item for item in self.sessions() if item.name == message.chat]
-        verified_matches = [item for item in matches if self.activate(item) == message.kind]
+        verified_matches = []
+        active_session = None
+        active_kind = None
+        for item in matches:
+            try:
+                candidate_kind = self.activate(item)
+            except FocusLost:
+                raise
+            except BotError as exc:
+                self._log_chat_skip(item, exc)
+                continue
+            active_session, active_kind = item, candidate_kind
+            if candidate_kind == message.kind:
+                verified_matches.append(item)
         if len(verified_matches) != 1:
             raise BotError("发送目标不可见或同类型同名，不允许猜测")
-        kind = self.activate(verified_matches[0])
-        if kind != message.kind or self.current() != (message.chat, message.kind):
+        target = verified_matches[0]
+        kind = active_kind if active_session == target else self.activate(target)
+        if kind != message.kind or not self.current_matches(message.chat, message.kind):
             raise BotError("发送前目标核验失败")
         edit = self._edit()
         if edit.window_text() != "":
             raise BotError("输入框已有草稿，拒绝覆盖")
         edit.click_input()
         self.require_foreground()
-        if self.current() != (message.chat, message.kind) or edit.window_text() != "":
+        if not self.current_matches(message.chat, message.kind) or edit.window_text() != "":
             raise FocusLost("输入前界面状态变化")
         before = [row_token(r.class_name(), r.window_text()) for r in self.rows()]
         if before_fill:
@@ -696,13 +717,13 @@ class WeChatDesktop:
         # From here on, any failure is ambiguous and the process must terminate.
         try:
             edit.set_text(answer)
-            if (not self.is_foreground() or self.current() != (message.chat, message.kind)
+            if (not self.is_foreground() or not self.current_matches(message.chat, message.kind)
                     or edit.window_text() != answer):
                 raise SendUncertain("填入回答后状态不明；请检查草稿，不自动重发")
             import pyautogui
             pyautogui.hotkey("alt", "s")
             time.sleep(.3)
-            if (not self.is_foreground() or self.current() != (message.chat, message.kind)
+            if (not self.is_foreground() or not self.current_matches(message.chat, message.kind)
                     or edit.window_text() != ""):
                 raise SendUncertain("发送结果不明；请人工检查，不自动重发")
             deadline = time.monotonic() + 3
