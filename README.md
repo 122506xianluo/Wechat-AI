@@ -116,8 +116,4 @@ media.py / ui_media.py         附件提取、受控微信 UI 媒体适配
 providers.py                  多模态/转写/embeddings 能力检查
 knowledge.py / safe_tools.py   知识库、FTS5、向量和安全工具
 static/ / templates/          无 Node 构建链的管理页面
-tests/                        离线自动化检查（已提交 Git）
-docs/                         实施状态、统一验收清单
 ~~~
-
-完整实施状态见 `docs/steps-03-11-status.md`；最终限定好友/测试群验收清单见 `docs/acceptance-steps-03-11.md`。真实微信 UI、媒体读取、模型能力、断焦点恢复以及 8/24 小时试运行均不能用离线检查代替。
