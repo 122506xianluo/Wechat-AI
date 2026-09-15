@@ -197,6 +197,76 @@ class Members:
             ]
 
 
+def extract_profile_nickname(profile, diagnostics=None):
+    """Read the display name at the top of a WeChat profile popover."""
+    probe = diagnostics if isinstance(diagnostics, dict) else {}
+    ignored = {
+        "微信", "Weixin", "朋友资料", "Friend Profile",
+        "朋友圈", "Moments", "添加到通讯录", "Add to Contacts",
+        "发消息", "Message", "语音聊天", "Voice Call",
+        "视频聊天", "Video Call", "昵称：", "Name:", "地区：", "Region:",
+    }
+    ignored_prefixes = ("地区：", "地区:", "Region:", "微信号：", "微信号:")
+    controls = []
+    try:
+        controls = profile.descendants()
+    except Exception as exc:
+        probe.update(result="profile_tree_unavailable", error=type(exc).__name__)
+        return ""
+
+    candidates = []
+    boundary_positions = []
+    type_counts = Counter()
+    for order, ctrl in enumerate(controls):
+        control_type = str(
+            getattr(getattr(ctrl, "element_info", None), "control_type", "")
+        ).lower()
+        type_counts[control_type or "unknown"] += 1
+        if control_type not in ("text", "button"):
+            continue
+        try:
+            value = ctrl.window_text().strip()
+        except Exception:
+            continue
+        try:
+            rect = ctrl.rectangle()
+            position = (rect.top, rect.left, order)
+        except Exception:
+            position = (10**9, 10**9, order)
+        if value in {"朋友圈", "Moments"} or any(
+            value.startswith(prefix) for prefix in ("地区：", "地区:", "Region:")
+        ):
+            boundary_positions.append(position)
+        if (
+            not value
+            or value in ignored
+            or any(value.startswith(prefix) for prefix in ignored_prefixes)
+        ):
+            continue
+        try:
+            normalize_name(value)
+        except ValueError:
+            continue
+        candidates.append((position, value))
+
+    probe.update(
+        strategy="profile_card_top_name",
+        descendant_types=dict(type_counts.most_common(8)),
+        candidate_count=len(candidates),
+    )
+    if boundary_positions:
+        boundary = min(boundary_positions)
+        candidates = [item for item in candidates if item[0] < boundary]
+        probe["candidate_count_before_boundary"] = probe["candidate_count"]
+        probe["candidate_count"] = len(candidates)
+    if not candidates:
+        probe["result"] = "profile_name_missing"
+        return ""
+    candidates.sort(key=lambda item: item[0])
+    probe["result"] = "profile_top_name"
+    return candidates[0][1]
+
+
 def extract_sender(row, known_names=(), *, element_from_point=None, scale=1.0,
                    diagnostics=None):
     """Read the nickname shown above an incoming group message bubble."""

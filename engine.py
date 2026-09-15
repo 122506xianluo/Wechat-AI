@@ -242,8 +242,7 @@ class Engine:
                 job["id"][:8], type(exc).__name__, error or type(exc).__name__,
             )
 
-    def tick(self):
-        self.bot.media.cleanup()
+    def start_workers(self):
         self.futures = {f for f in self.futures if not f.done()}
         while len(self.futures) < 2 and not self.bot.stopped():
             job = self.jobs.claim()
@@ -259,6 +258,10 @@ class Engine:
         ):
             self.index_future = self.pool.submit(self.bot.knowledge.index_one)
             self.futures.add(self.index_future)
+
+    def tick(self):
+        self.bot.media.cleanup()
+        self.start_workers()
         self.send_ready()
 
     def send_ready(self, only=None):
