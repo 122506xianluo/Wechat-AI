@@ -216,6 +216,14 @@ def row_token(class_name: str, text: str) -> str:
     return sha256((class_name + "\0" + text).encode()).hexdigest()
 
 
+def row_runtime_id(row):
+    try:
+        value = row.element_info.runtime_id
+        return tuple(value) if value else None
+    except Exception:
+        return None
+
+
 def _control_type_name(ctrl) -> str:
     for getter in (
         lambda: getattr(getattr(ctrl, "element_info", None), "control_type", ""),
@@ -259,6 +267,22 @@ def _normalized_title(value: str) -> str:
     """Normalize display-only differences emitted by separate WeChat controls."""
     value = unicodedata.normalize("NFC", value or "").strip()
     return re.sub(r"[\u00a0\u2005\u200b\ufeff\ufe0e\ufe0f]", "", value)
+
+
+def _normalized_message_text(value: str) -> str:
+    """Normalize UI-only text differences without fuzzy content matching."""
+    value = unicodedata.normalize("NFC", value or "").replace("\r\n", "\n").replace("\r", "\n")
+    value = re.sub(r"[\u200b\ufeff\ufe0e\ufe0f]", "", value)
+    value = re.sub(r"[\u00a0\u2005]", " ", value)
+    return "\n".join(line.rstrip() for line in value.splitlines()).strip()
+
+
+def _message_text_matches(observed: str, expected: str) -> bool:
+    observed = _normalized_message_text(observed)
+    expected = _normalized_message_text(expected)
+    return observed == expected or (
+        re.sub(r"\s+", " ", observed) == re.sub(r"\s+", " ", expected)
+    )
 
 
 def group_sender_name(row) -> str:
@@ -498,11 +522,35 @@ class WeChatDesktop:
         )
         self._chat_skip_log[key] = (now, 0)
 
+    def _selected_session_name(self) -> str:
+        """Read the exact selected session when WeChat omits its title control."""
+        try:
+            items = self.window.child_window(**self.Main.SessionList).children(
+                control_type="ListItem"
+            )
+        except Exception:
+            return ""
+        selected = []
+        for item in items:
+            try:
+                if item.is_selected():
+                    selected.append(item)
+            except Exception:
+                continue
+        if len(selected) != 1:
+            return ""
+        key = selected[0].automation_id()
+        if not key.startswith("session_item_"):
+            return ""
+        return key.removeprefix("session_item_").strip()
+
     def current(self) -> tuple[str, str]:
         title = self.window.child_window(**self.Texts.CurrentChatNameText)
-        if not title.exists(timeout=.2):
+        name = title.window_text().strip() if title.exists(timeout=.2) else ""
+        if not name:
+            name = self._selected_session_name()
+        if not name:
             raise BotError("当前聊天标题不可读")
-        name = title.window_text()
         if self.Tools.is_group_chat(self.window):
             kind = "group"
         elif self.window.child_window(**self.Buttons.ChatHistoryButton).exists(timeout=.2):
@@ -711,7 +759,10 @@ class WeChatDesktop:
         self.require_foreground()
         if not self.current_matches(message.chat, message.kind) or edit.window_text() != "":
             raise FocusLost("输入前界面状态变化")
-        before = [row_token(r.class_name(), r.window_text()) for r in self.rows()]
+        before_rows = self.rows()
+        before = [row_token(r.class_name(), r.window_text()) for r in before_rows]
+        before_runtime_ids = [row_runtime_id(row) for row in before_rows]
+        runtime_ids_supported = all(value is not None for value in before_runtime_ids)
         if before_fill:
             before_fill()
         # From here on, any failure is ambiguous and the process must terminate.
@@ -726,19 +777,53 @@ class WeChatDesktop:
             if (not self.is_foreground() or not self.current_matches(message.chat, message.kind)
                     or edit.window_text() != ""):
                 raise SendUncertain("发送结果不明；请人工检查，不自动重发")
-            deadline = time.monotonic() + 3
+            deadline = time.monotonic() + 6
             confirmed = False
+            last_new_count = last_text_matches = 0
+            last_directions = {}
             while time.monotonic() < deadline:
                 self.require_foreground()
                 rows = self.rows()
-                tracker = SnapshotTracker()
-                tracker.update("send", before)
-                indices = tracker.update("send", [row_token(r.class_name(), r.window_text()) for r in rows])
-                confirmed = any(rows[i].window_text().strip() == answer.strip() and uia_row_direction(rows[i]) == "outgoing" for i in indices)
+                current_runtime_ids = [row_runtime_id(row) for row in rows]
+                if runtime_ids_supported and all(
+                    value is not None for value in current_runtime_ids
+                ):
+                    previous_ids = set(before_runtime_ids)
+                    indices = [
+                        index for index, value in enumerate(current_runtime_ids)
+                        if value not in previous_ids
+                    ]
+                else:
+                    tracker = SnapshotTracker()
+                    tracker.update("send", before)
+                    indices = tracker.update(
+                        "send",
+                        [row_token(r.class_name(), r.window_text()) for r in rows],
+                    )
+                candidates = [
+                    rows[i] for i in indices
+                    if _message_text_matches(rows[i].window_text(), answer)
+                ]
+                directions = [
+                    row_direction(row, self.scale, message.kind, self.cfg.bot_names)
+                    for row in candidates
+                ]
+                confirmed = "outgoing" in directions
+                last_new_count = len(indices)
+                last_text_matches = len(candidates)
+                last_directions = {
+                    value: directions.count(value) for value in set(directions)
+                }
                 if confirmed:
                     break
                 time.sleep(.1)
             if not confirmed or edit.window_text() != "":
+                log.warning(
+                    "send_verification_unknown new_rows=%d text_matches=%d "
+                    "directions=%s input_empty=%s",
+                    last_new_count, last_text_matches, last_directions,
+                    edit.window_text() == "",
+                )
                 raise SendUncertain("未核验到新出站消息，需人工确认")
         except SendUncertain:
             raise

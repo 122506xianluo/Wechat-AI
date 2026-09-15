@@ -6,7 +6,7 @@ import json
 import logging
 import time
 from commands import parse_command
-from job_queue import JobQueue
+from job_queue import JobQueue, safe_error_detail
 
 
 class Engine:
@@ -262,7 +262,7 @@ class Engine:
         self.send_ready()
 
     def send_ready(self, only=None):
-        from bot import Message, BotError, FocusLost, SendUncertain
+        from bot import Message, BotError, FocusLost
 
         b = self.bot
         for job in self.jobs.ready():
@@ -328,14 +328,23 @@ class Engine:
                 # Prefill focus loss leaves ready work intact. After sending is unknown.
                 if self.jobs.get(job["id"])["entered_sending"]:
                     self.jobs.finish(job["id"], "unknown", "focus_after_sending")
-                    raise SendUncertain("发送阶段失焦，请人工核对")
+                    logging.getLogger("minimal_wechat_ai").warning(
+                        "send_unknown id=%s reason=focus_after_sending",
+                        job["id"][:8],
+                    )
+                    continue
                 raise
             except BotError as exc:
                 # BotError before before_fill cannot have touched the input box.
                 # Keep the durable job ready and let later polls retry safely.
                 if self.jobs.get(job["id"])["entered_sending"]:
-                    self.jobs.finish(job["id"], "unknown", type(exc).__name__)
-                    raise SendUncertain("发送结果不明；任务不会自动重发") from exc
+                    error = safe_error_detail(exc)
+                    self.jobs.finish(job["id"], "unknown", error)
+                    logging.getLogger("minimal_wechat_ai").warning(
+                        "send_unknown id=%s detail=%r auto_retry=false",
+                        job["id"][:8], error,
+                    )
+                    continue
                 self.log_send_deferred(job["id"], exc)
                 continue
             except Exception as exc:
@@ -352,7 +361,11 @@ class Engine:
                         "reply_unknown" if state == "unknown" else "reply_failed",
                     )
                 if state == "unknown":
-                    raise SendUncertain("发送结果不明；任务不会自动重发") from exc
+                    logging.getLogger("minimal_wechat_ai").warning(
+                        "send_unknown id=%s detail=%r auto_retry=false",
+                        job["id"][:8], safe_error_detail(exc),
+                    )
+                    continue
                 raise
 
     def close(self):
