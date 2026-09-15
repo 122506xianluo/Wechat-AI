@@ -209,7 +209,9 @@ def extract_profile_nickname(profile, diagnostics=None):
     ignored_prefixes = ("地区：", "地区:", "Region:", "微信号：", "微信号:")
     controls = []
     try:
-        controls = profile.descendants()
+        # WeChat exposes the nickname as the first Text in this compact card.
+        # Filtering at the UIA query avoids walking images, panes and thumbnails.
+        controls = profile.descendants(control_type="Text")
     except Exception as exc:
         probe.update(result="profile_tree_unavailable", error=type(exc).__name__)
         return ""
@@ -222,7 +224,7 @@ def extract_profile_nickname(profile, diagnostics=None):
             getattr(getattr(ctrl, "element_info", None), "control_type", "")
         ).lower()
         type_counts[control_type or "unknown"] += 1
-        if control_type not in ("text", "button"):
+        if control_type != "text":
             continue
         try:
             value = ctrl.window_text().strip()

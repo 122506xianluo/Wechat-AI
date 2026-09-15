@@ -495,6 +495,7 @@ class WeChatDesktop:
         self.on_messages = None
         self._chat_skip_log = {}
         self._unsupported_sessions = set()
+        self._profile_selector_index = 0
         try:
             import ctypes
             self.scale = ctypes.windll.user32.GetDpiForWindow(self.hwnd) / 96 or 1.0
@@ -701,11 +702,14 @@ class WeChatDesktop:
              "title_re": "^(Weixin|微信)$"},
         )
         deadline = time.monotonic() + max(0.0, timeout)
+        preferred = getattr(self, "_profile_selector_index", 0)
+        order = [preferred] + [i for i in range(len(selectors)) if i != preferred]
         while True:
-            for selector in selectors:
+            for index in order:
                 try:
-                    card = self.desktop.window(**selector)
-                    if card.exists(timeout=0) and card.is_visible():
+                    card = self.desktop.window(**selectors[index])
+                    if card.exists(timeout=0):
+                        self._profile_selector_index = index
                         return card
                 except Exception:
                     continue
@@ -753,43 +757,6 @@ class WeChatDesktop:
             )
             diagnostics.update(avatar_result="uia_control", avatar_control_type=control_type[:30])
             return center_x, center_y
-        hit_candidates = {}
-        x_limit = min(right - 2, left + max(60, round(80 * max(1.0, self.scale))))
-        y_limit = min(bottom - 2, top + max(40, round(64 * max(1.0, self.scale))))
-        for y in range(top + 3, y_limit + 1, max(4, round(6 * max(1.0, self.scale)))):
-            for x in range(left + 3, x_limit + 1, max(4, round(6 * max(1.0, self.scale)))):
-                try:
-                    ctrl = self.desktop.from_point(x, y)
-                    control_type = _control_type_name(ctrl).lower()
-                    rect = _control_rect(ctrl)
-                except Exception:
-                    continue
-                if rect is None or not any(
-                    name in control_type for name in ("button", "image")
-                ):
-                    continue
-                c_left, c_top, c_right, c_bottom = rect
-                c_width, c_height = c_right - c_left, c_bottom - c_top
-                if (
-                    16 <= c_width <= max_size
-                    and 16 <= c_height <= max_size
-                    and 0.55 <= c_width / c_height <= 1.8
-                    and left <= c_left < x_limit
-                    and top <= c_top < bottom
-                ):
-                    hit_candidates[rect] = control_type
-        diagnostics["avatar_hit_candidate_count"] = len(hit_candidates)
-        if hit_candidates:
-            rect, control_type = min(
-                hit_candidates.items(),
-                key=lambda item: (item[0][0], abs((item[0][2] - item[0][0])
-                                                  - (item[0][3] - item[0][1]))),
-            )
-            diagnostics.update(
-                avatar_result="uia_hit_test",
-                avatar_control_type=control_type[:30],
-            )
-            return (rect[0] + rect[2]) // 2, (rect[1] + rect[3]) // 2
         if width < 60 or height < 24:
             diagnostics["avatar_result"] = "row_too_small"
             return None
@@ -802,10 +769,8 @@ class WeChatDesktop:
 
     def _profile_card_sender(self, row, chat_name: str, diagnostics: dict):
         """Click an incoming avatar, read its profile name, then close the card."""
+        started = time.monotonic()
         diagnostics["strategy"] = "profile_card_nickname"
-        if self._profile_card(.05) is not None:
-            diagnostics["result"] = "profile_already_open"
-            return "", "profile_card_already_open", 0.0
         point = self._incoming_avatar_point(row, diagnostics)
         if point is None:
             return "", "profile_card_avatar_missing", 0.0
@@ -820,7 +785,7 @@ class WeChatDesktop:
             from pywinauto import mouse
 
             mouse.click(button="left", coords=point)
-            card = self._profile_card(2.0)
+            card = self._profile_card(1.0)
             if card is None:
                 diagnostics["result"] = "profile_not_opened"
             else:
@@ -837,18 +802,29 @@ class WeChatDesktop:
                     mouse.click(button="left", coords=point)
                 except Exception:
                     pass
-                if self._profile_card(.4) is not None:
+                time.sleep(.05)
+                try:
+                    still_open = card.exists(timeout=.05) and card.is_visible()
+                except Exception:
+                    still_open = False
+                if still_open:
                     try:
                         import pyautogui
 
                         pyautogui.press("esc")
                     except Exception:
                         pass
-                if self._profile_card(.4) is not None:
+                    time.sleep(.05)
+                    try:
+                        still_open = card.exists(timeout=.05) and card.is_visible()
+                    except Exception:
+                        still_open = False
+                if still_open:
                     diagnostics["close_result"] = "profile_still_open"
                     sender = ""
                 else:
                     diagnostics["close_result"] = "closed"
+        diagnostics["elapsed_ms"] = round((time.monotonic() - started) * 1000)
 
         if not sender:
             result = str(diagnostics.get("result", "profile_name_missing"))
@@ -926,17 +902,30 @@ class WeChatDesktop:
                 triggered = kind != "group" or self.policy.group_triggered(
                     text, has_attachment=attachment is not None
                 )
-                # Ignore ordinary group text before any sender probing. An
-                # attachment remains available for the existing adjacent-message
-                # pairing logic in mention/prefix modes.
-                if kind == "group" and not triggered and attachment is None:
+                # Group identity is resolved only for a message that independently
+                # triggers the bot. No nickname is read from the bubble itself.
+                if kind == "group" and not triggered:
                     continue
                 source_key = sha256((key + "|" + "|".join(tokens[max(0,index-8):index+1]) + "|" + str(index)).encode()).hexdigest()
                 method, confidence, sender_features = "uia_avatar", 1.0, {}
                 try:
-                    direction = row_direction(row, self.scale, kind, self.cfg.bot_names)
-                    # Commands require UIA evidence, not a trigger or screenshot.
-                    verified = uia_row_direction(row) == "incoming"
+                    uia_direction = uia_row_direction(row)
+                    # Reuse the command verification result instead of traversing
+                    # the same UIA row twice on the normal path.
+                    verified = uia_direction == "incoming"
+                    if uia_direction in ("incoming", "outgoing"):
+                        direction = uia_direction
+                    elif kind == "group":
+                        try:
+                            direction = bubble_direction(
+                                row.capture_as_image(), self.scale, kind
+                            )
+                        except Exception:
+                            direction = "unknown"
+                    else:
+                        direction = row_direction(
+                            row, self.scale, kind, self.cfg.bot_names
+                        )
                 except Exception:
                     direction, verified = "unknown", False
                 if direction != "incoming":
@@ -947,38 +936,15 @@ class WeChatDesktop:
                 sender = session.name if kind == "private" else ""
                 if kind == "group":
                     try:
-                        from members import extract_sender, strip_sender_prefix
-
-                        with self.chats.storage._connection() as connection:
-                            aliases = [
-                                item[0]
-                                for item in connection.execute(
-                                    "SELECT name FROM principal_aliases "
-                                    "WHERE chat_id=? AND status='active'",
-                                    (chat["id"],),
-                                )
-                            ]
-                        sender, method, confidence = extract_sender(
-                            row,
-                            aliases,
-                            element_from_point=self.desktop.from_point,
-                            scale=self.scale,
-                            diagnostics=sender_features,
+                        profile_probe = {}
+                        sender, method, confidence = self._profile_card_sender(
+                            row, session.name, profile_probe
                         )
-                        # Opening a profile changes UI state, so it is reserved for
-                        # rows that have already passed the cheap trigger check.
-                        if not sender and triggered:
-                            profile_probe = {}
-                            sender, method, confidence = self._profile_card_sender(
-                                row, session.name, profile_probe
-                            )
-                            sender_features["profile_card"] = profile_probe
+                        sender_features["profile_card"] = profile_probe
                         if sender:
-                            text = strip_sender_prefix(text, sender)
-                            if method == "profile_card_nickname":
-                                # The card can expose the account nickname while
-                                # the row paints a different group nickname.
-                                text = self.policy.strip_group_row_label(text)
+                            # The card can expose the account nickname while the
+                            # row paints a different group nickname.
+                            text = self.policy.strip_group_row_label(text)
                     except FocusLost:
                         raise
                     except Exception as exc:
