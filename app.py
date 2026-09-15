@@ -17,11 +17,10 @@ import webbrowser
 from urllib.parse import urlsplit
 
 import httpx
-from flask import Flask, g, jsonify, render_template, request
+from flask import Flask, g, jsonify, redirect, render_template, request
 
 from bot import Config, LLMSettings
 from permissions import LOCAL_OWNER, PermissionDenied, Permissions
-from auth_web import register_auth
 from storage import Storage
 from admin_api import register_admin
 
@@ -370,6 +369,12 @@ def index():
     return render_template("index.html", csrf_token=g.csrf)
 
 
+@app.get("/login")
+@app.get("/manage")
+def legacy_console_redirect():
+    return redirect("/")
+
+
 @app.get("/api/state")
 def api_state():
     cfg, cfg_error = read_config_state()
@@ -613,7 +618,6 @@ def dump_error(exc=None):
 
 
 app.bot_is_running = lambda: bot_running()
-register_auth(app, get_storage, management_error)
 register_admin(app, get_storage, management_error)
 for _name in ("state", "start", "stop", "test", "log"):
     app.add_url_rule("/api/v1/" + _name, "v1_" + _name, globals()["api_" + _name], methods=["GET"] if _name in ("state", "log") else ["POST"])

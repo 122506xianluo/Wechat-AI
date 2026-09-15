@@ -104,7 +104,6 @@ EMBEDDING_MODEL=
 ~~~text
 panel.bat / bootstrap.py       单一启动入口、安装和环境准备
 app.py / admin_api.py          运行控制台和 v1 管理 API
-auth.py / auth_web.py          旧账户数据兼容；当前本地控制台免登录
 bot.py / engine.py             单线程微信 UI、网络工作线程、消息调度
 storage.py / migrations.py     SQLite 仓库与 v1→v11 迁移
 schema_steps.py                各阶段表结构

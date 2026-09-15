@@ -1,6 +1,6 @@
 """Versioned management endpoints protected by the loopback and CSRF guard."""
 
-from flask import Blueprint, g, jsonify, request, render_template
+from flask import Blueprint, g, jsonify, request
 from roles import Roles
 
 
@@ -16,12 +16,6 @@ def register_admin(app, get_storage, error):
     @api.errorhandler(ValueError)
     def invalid(exc):
         return error(exc)
-
-    @api.get("/manage")
-    def manage():
-        return render_template(
-            "manage.html", csrf_token=getattr(g, "csrf", app.config["LOCAL_CSRF_TOKEN"])
-        )
 
     @api.get("/api/v1/roles")
     def roles():
