@@ -586,8 +586,28 @@ class WeChatDesktop:
         matches = [item for item in items if item.automation_id() == session.key]
         if len(matches) <= session.occurrence:
             raise BotError("目标会话不在当前可见会话列表中")
-        # Always click the actual list item, not a name-only shortcut.
-        matches[session.occurrence].click_input()
+        target = matches[session.occurrence]
+        try:
+            target_selected = bool(target.is_selected())
+        except Exception:
+            target_selected = False
+        try:
+            current_name, current_kind = self.current()
+        except BotError:
+            current_name, current_kind = "", None
+        current_ready = (
+            _normalized_title(current_name) == _normalized_title(session.name)
+            and current_kind in ("private", "group")
+            and edit is not None
+        )
+        # WeChat 4.1.13.12 closes the current chat when its selected session is
+        # clicked again. Use the exact SelectionItem state when available. If it
+        # is not exposed, an exact title is sufficient only for a unique name.
+        if current_ready and (target_selected or len(matches) == 1):
+            return current_kind
+
+        # The target is not the current chat, so switching is now necessary.
+        target.click_input()
         time.sleep(.25)
         deadline = time.monotonic() + 3.0
         expected_title = _normalized_title(session.name)
