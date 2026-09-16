@@ -518,7 +518,12 @@ class WeChatDesktop:
             raise FocusLost("微信不是虚拟机内的前台窗口")
 
     def sessions(self) -> list[Session]:
-        items = self.window.child_window(**self.Main.SessionList).children(control_type="ListItem")
+        try:
+            items = self.window.child_window(**self.Main.SessionList).children(
+                control_type="ListItem"
+            )
+        except Exception as exc:
+            raise BotError("会话列表暂时不可读") from exc
         result, counts = [], {}
         ignored = set(getattr(self.Texts, "NotCare", ()))
         for item in items:
@@ -548,6 +553,8 @@ class WeChatDesktop:
             reason = "session_not_visible"
         elif "输入框" in detail:
             reason = "input_unavailable"
+        elif "消息列表" in detail or "会话列表" in detail:
+            reason = "wechat_list_unavailable"
         else:
             reason = "activation_failed"
         key = (session.key, session.occurrence, reason, detail)
@@ -587,18 +594,26 @@ class WeChatDesktop:
         return key.removeprefix("session_item_").strip()
 
     def current(self) -> tuple[str, str]:
-        title = self.window.child_window(**self.Texts.CurrentChatNameText)
-        name = title.window_text().strip() if title.exists(timeout=.2) else ""
+        try:
+            title = self.window.child_window(**self.Texts.CurrentChatNameText)
+            name = title.window_text().strip() if title.exists(timeout=.2) else ""
+        except Exception:
+            # WeChat can rebuild the title control between exists() and
+            # window_text(). The selected session remains a valid fallback.
+            name = ""
         if not name:
             name = self._selected_session_name()
         if not name:
             raise BotError("当前聊天标题不可读")
-        if self.Tools.is_group_chat(self.window):
-            kind = "group"
-        elif self.window.child_window(**self.Buttons.ChatHistoryButton).exists(timeout=.2):
-            kind = "private"
-        else:
-            kind = "other"
+        try:
+            if self.Tools.is_group_chat(self.window):
+                kind = "group"
+            elif self.window.child_window(**self.Buttons.ChatHistoryButton).exists(timeout=.2):
+                kind = "private"
+            else:
+                kind = "other"
+        except Exception as exc:
+            raise BotError("当前聊天类型暂时不可读") from exc
         return name, kind
 
     def current_matches(self, name: str, kind: str) -> bool:
@@ -687,10 +702,15 @@ class WeChatDesktop:
             time.sleep(.05)
 
     def rows(self):
-        messages = self.window.child_window(**self.Main.FriendChatList)
-        if not messages.exists(timeout=.2):
-            raise BotError("消息列表不可读")
-        return messages.children(control_type="ListItem")
+        try:
+            messages = self.window.child_window(**self.Main.FriendChatList)
+            if not messages.exists(timeout=.2):
+                raise BotError("消息列表暂时不可读")
+            return messages.children(control_type="ListItem")
+        except BotError:
+            raise
+        except Exception as exc:
+            raise BotError("消息列表暂时不可读") from exc
 
     def _profile_card(self, timeout: float = 0.0):
         selectors = (
@@ -883,8 +903,17 @@ class WeChatDesktop:
             seen.append((kind, session.name))
             chat = self.chats.get(kind, session.name)
             key = str(chat['id']) + ':' + str(session.occurrence)
-            rows = self.rows()
-            tokens = [row_token(r.class_name(), r.window_text()) for r in rows]
+            try:
+                rows = self.rows()
+                tokens = [row_token(r.class_name(), r.window_text()) for r in rows]
+            except BotError as exc:
+                self._log_chat_skip(session, exc)
+                continue
+            except Exception:
+                self._log_chat_skip(
+                    session, BotError("消息列表刷新期间暂时不可读")
+                )
+                continue
             revision = chat['baseline_revision']
             if self.approval_baselines.get(key) != revision:
                 self.tracker.snapshots.pop(key, None)
@@ -1197,6 +1226,8 @@ class Bot:
     def run(self):
         ready = False
         focused_since = None
+        last_ui_error = None
+        last_ui_error_at = 0.0
         log.info("started mode=LIVE no_rate_limit=true")
         log.info("请让微信在虚拟机内保持前台；宿主机可正常使用")
         while not self.stopped():
@@ -1207,16 +1238,17 @@ class Bot:
                 focused_since = None
                 time.sleep(.25)
                 continue
-            if not ready:
-                if focused_since is None:
-                    focused_since = time.monotonic()
-                if time.monotonic() - focused_since < 1.0:
-                    time.sleep(.1)
-                    continue
-                self.desktop.warmup()
-                ready = True
-                log.info("ready history_rebaselined=true")
             try:
+                if not ready:
+                    if focused_since is None:
+                        focused_since = time.monotonic()
+                    if time.monotonic() - focused_since < 1.0:
+                        time.sleep(.1)
+                        continue
+                    self.desktop.warmup()
+                    ready = True
+                    last_ui_error = None
+                    log.info("ready history_rebaselined=true")
                 messages = self.desktop.poll()
                 self.engine.observe_batch(messages)
                 self.engine.tick()
@@ -1227,6 +1259,24 @@ class Bot:
                     "paused reason=focus_lost message_baseline_will_rebuild=true "
                     "sqlite_context_preserved=true"
                 )
+                time.sleep(.25)
+                continue
+            except BotError as exc:
+                # UIA controls are rebuilt while WeChat changes pages, repaints or
+                # closes a profile card. That is transient and must not stop the bot.
+                ready = False
+                focused_since = None
+                detail = " ".join(str(exc).split())[:240] or type(exc).__name__
+                now = time.monotonic()
+                if detail != last_ui_error or now - last_ui_error_at >= 60.0:
+                    log.warning(
+                        "paused reason=wechat_ui_temporarily_unavailable "
+                        "detail=%r message_baseline_will_rebuild=true "
+                        "sqlite_context_preserved=true",
+                        detail,
+                    )
+                    last_ui_error = detail
+                    last_ui_error_at = now
                 time.sleep(.25)
                 continue
             time.sleep(self.cfg.poll_seconds)
