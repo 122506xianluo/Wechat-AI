@@ -122,12 +122,51 @@ class JobQueue:
 
     def list(self):
         with self.storage._connection() as c:
-            return [
+            rows = [
                 dict(r)
                 for r in c.execute(
                     "SELECT id,chat_id,principal_id,scope_id,job_type,state,attempts,entered_sending,last_error,created_at,updated_at FROM message_jobs ORDER BY created_at DESC LIMIT 300"
                 )
             ]
+            for row in rows:
+                blocker = self._blocker(c, row)
+                row["blocked_by_id"] = blocker["id"] if blocker else None
+                row["blocked_by_state"] = blocker["state"] if blocker else None
+            return rows
+
+    @staticmethod
+    def _blocker(connection, row):
+        if row["state"] not in ("queued", "retry_wait", "ready_to_send"):
+            return None
+        return connection.execute(
+            """SELECT id,state FROM message_jobs WHERE scope_id=?
+               AND state IN ('queued','retry_wait','processing','ready_to_send','sending','unknown')
+               AND (created_at<? OR (created_at=? AND rowid<(SELECT rowid FROM message_jobs WHERE id=?)))
+               ORDER BY created_at,rowid LIMIT 1""",
+            (row["scope_id"], row["created_at"], row["created_at"], row["id"]),
+        ).fetchone()
+
+    def blockers(self, limit=5):
+        """Return queued work held behind an earlier scope job, for diagnostics."""
+        with self.storage._connection() as c:
+            pending = c.execute(
+                """SELECT id,scope_id,state,created_at FROM message_jobs
+                   WHERE state IN ('queued','retry_wait','ready_to_send')
+                   ORDER BY created_at,rowid LIMIT 100"""
+            ).fetchall()
+            result = []
+            for row in pending:
+                blocker = self._blocker(c, row)
+                if blocker:
+                    result.append({
+                        "id": row["id"],
+                        "state": row["state"],
+                        "blocked_by_id": blocker["id"],
+                        "blocked_by_state": blocker["state"],
+                    })
+                    if len(result) >= limit:
+                        break
+            return result
 
     def recover(self):
         now = time.time()

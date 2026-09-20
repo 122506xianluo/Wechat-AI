@@ -22,6 +22,7 @@ class Engine:
         self.futures = set()
         self.index_future = None
         self.send_deferrals = {}
+        self.queue_block_log = {}
 
     def log_send_deferred(self, job_id, exc):
         detail = " ".join(str(exc).split())[:240] or type(exc).__name__
@@ -289,11 +290,26 @@ class Engine:
                     future.result()
                 except Exception:
                     log.exception("后台工作线程异常，请检查任务队列或知识库状态")
+        claimed = False
         while len(self.futures) < 2 and not self.bot.stopped():
             job = self.jobs.claim()
             if job is None:
                 break
+            claimed = True
             self.futures.add(self.pool.submit(self.generate, job))
+        if not claimed:
+            now = time.monotonic()
+            for blocked in self.jobs.blockers():
+                key = (blocked["id"], blocked["blocked_by_id"], blocked["blocked_by_state"])
+                last = self.queue_block_log.get(key, 0.0)
+                if now - last >= 60.0:
+                    log.warning(
+                        "任务正在等待前序任务处理：任务=%s，被任务=%s阻塞，前序状态=%s；"
+                        "若状态为unknown，请在任务队列人工确认已发送或确认未发送并克隆",
+                        blocked["id"][:8], blocked["blocked_by_id"][:8],
+                        blocked["blocked_by_state"],
+                    )
+                    self.queue_block_log[key] = now
         if self.index_future is not None and self.index_future.done():
             self.index_future = None
         if (

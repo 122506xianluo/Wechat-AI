@@ -1178,8 +1178,29 @@ class ChatLLM:
 
 
 class InstanceLock:
+    """Process-wide singleton guard; a Windows named mutex is not path-lock fragile."""
+
     def __init__(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)
+        self.file = None
+        self.handle = None
+        if os.name == "nt":
+            import ctypes
+            from hashlib import sha256
+
+            name = "Local\\WeChatAI-" + sha256(
+                str(path.resolve()).casefold().encode("utf-8")
+            ).hexdigest()[:24]
+            kernel32 = ctypes.windll.kernel32
+            kernel32.CreateMutexW.restype = ctypes.c_void_p
+            self.handle = kernel32.CreateMutexW(None, False, name)
+            if not self.handle:
+                raise BotError("无法创建机器人实例锁")
+            if kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+                kernel32.CloseHandle(self.handle)
+                self.handle = None
+                raise BotError("已有机器人实例在运行")
+            return
         self.file = path.open("a+b")
         try:
             import msvcrt
@@ -1187,10 +1208,17 @@ class InstanceLock:
             msvcrt.locking(self.file.fileno(), msvcrt.LK_NBLCK, 1)
         except OSError:
             self.file.close()
+            self.file = None
             raise BotError("已有机器人实例在运行") from None
 
     def close(self):
-        self.file.close()
+        if self.handle is not None:
+            import ctypes
+            ctypes.windll.kernel32.CloseHandle(self.handle)
+            self.handle = None
+        if self.file is not None:
+            self.file.close()
+            self.file = None
 
 
 class Bot:
@@ -1327,20 +1355,26 @@ def main(argv=None) -> int:
         raise ValueError("存在 STOP 文件；请通过 panel.bat 打开控制台后启动")
     lock = InstanceLock(ROOT / "data" / "bot.lock")
     pid_path = ROOT / "data" / "bot.pid"
+    ready_path = ROOT / "data" / "bot.ready"
     bot = None
     try:
-        bot = Bot(ROOT, cfg, settings)
+        # Publish ownership before slow UI/database initialization so the panel
+        # cannot start a second controller during this window.
         pid_path.write_text(str(os.getpid()) + "\n", encoding="ascii")
+        ready_path.unlink(missing_ok=True)
+        bot = Bot(ROOT, cfg, settings)
+        ready_path.write_text(str(os.getpid()) + "\n", encoding="ascii")
         bot.run()
     finally:
         if bot:
             bot.close()
-        try:
-            if (pid_path.exists()
-                    and pid_path.read_text(encoding="ascii").strip() == str(os.getpid())):
-                pid_path.unlink()
-        except OSError:
-            pass
+        for marker in (ready_path, pid_path):
+            try:
+                if (marker.exists()
+                        and marker.read_text(encoding="ascii").strip() == str(os.getpid())):
+                    marker.unlink()
+            except OSError:
+                pass
         lock.close()
     return 0
 

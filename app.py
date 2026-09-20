@@ -29,6 +29,7 @@ log = logging.getLogger("wechat_ai.panel")
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
 BOT_PID = DATA / "bot.pid"
+BOT_READY = DATA / "bot.ready"
 PANEL_PID = DATA / "panel.pid"
 STOP_FILE = ROOT / "STOP"
 ENV_FILE = ROOT / ".env"
@@ -52,6 +53,7 @@ app.config["MAX_CONTENT_LENGTH"] = 72 * 1024 * 1024
 app.config["LOCAL_CSRF_TOKEN"] = secrets.token_urlsafe(32)
 _storage = None
 _storage_error = None
+_bot_start_lock = threading.Lock()
 
 
 def get_storage() -> Storage:
@@ -542,46 +544,68 @@ def api_start():
     log.info("收到启动机器人请求")
     if g.actor.access_level != "owner":
         return fail("启动并保存配置仅允许本机控制台操作", 403)
-    if bot_running():
-        return fail("已经在运行")
-    data = request.get_json(silent=True) or {}
+    if not _bot_start_lock.acquire(blocking=False):
+        return fail("机器人正在启动，请勿重复点击", 409)
     try:
-        cfg = config_from_payload(data)
-        settings = settings_from_payload(data)
-        write_env(settings.base_url, str(data.get("llm_api_key", "")).strip(), settings.model)
-        save_config(cfg)
-    except Exception as exc:
-        return fail(str(exc))
-    try:
-        STOP_FILE.unlink(missing_ok=True)
-    except OSError:
-        pass
-    ok, output = run_check()
-    if not ok:
-        return fail(output or "配置检查未通过")
-    DATA.mkdir(exist_ok=True)
-    # The child logs only to stderr in this mode. Both native output streams go
-    # to one file, including failures before Python logging can initialize.
-    with LOG_FILE.open("ab", buffering=0) as output_file:
-        process = subprocess.Popen(
-            [str(venv_python(False)), "-X", "utf8", "-u", str(ROOT / "bot.py")],
-            cwd=str(ROOT), close_fds=True, creationflags=DETACHED,
-            env=bot_process_env(), stdin=subprocess.DEVNULL,
-            stdout=output_file, stderr=subprocess.STDOUT)
-    log.info("机器人进程已创建：进程号=%d，标准输出和错误输出已接入命令行面板", process.pid)
-    deadline = time.monotonic() + 3.0
-    while time.monotonic() < deadline:
-        if bot_running():
-            return jsonify({
-                "ok": True,
-                "message": "已启动",
-                "pid": read_pid(BOT_PID),
-                "log": tail_log(),
-            })
-        time.sleep(0.1)
-    log.warning("尚未收到机器人启动确认，请查看命令行输出")
-    hint = redact(tail_log(), secret_values(ROOT)) or output or "启动失败，请看日志"
-    return fail(hint[-500:])
+        running_pid = read_pid(BOT_PID)
+        if running_pid:
+            log.info("机器人已经在运行：进程号=%d；忽略重复启动请求", running_pid)
+            return jsonify({"ok": True, "message": "已经在运行", "pid": running_pid})
+        data = request.get_json(silent=True) or {}
+        try:
+            cfg = config_from_payload(data)
+            settings = settings_from_payload(data)
+            write_env(settings.base_url, str(data.get("llm_api_key", "")).strip(), settings.model)
+            save_config(cfg)
+        except Exception as exc:
+            return fail(str(exc))
+        for marker in (STOP_FILE, BOT_READY):
+            try:
+                marker.unlink(missing_ok=True)
+            except OSError:
+                pass
+        ok, output = run_check()
+        if not ok:
+            return fail(output or "配置检查未通过")
+        DATA.mkdir(exist_ok=True)
+        # Capture output that occurs before the child initializes Python logging.
+        with LOG_FILE.open("ab", buffering=0) as output_file:
+            process = subprocess.Popen(
+                [str(venv_python(False)), "-X", "utf8", "-u", str(ROOT / "bot.py")],
+                cwd=str(ROOT), close_fds=True, creationflags=DETACHED,
+                env=bot_process_env(), stdin=subprocess.DEVNULL,
+                stdout=output_file, stderr=subprocess.STDOUT)
+        # Reserve the PID immediately. Bot initialization can take several seconds;
+        # without this reservation a second click can launch another UI controller.
+        BOT_PID.write_text(str(process.pid) + "\n", encoding="ascii")
+        log.info("机器人进程已创建：进程号=%d，正在初始化微信和本地服务", process.pid)
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline:
+            code = process.poll()
+            if code is not None:
+                if read_pid(BOT_PID) == process.pid:
+                    BOT_PID.unlink(missing_ok=True)
+                log.warning("机器人初始化失败：进程提前退出，退出码=%d", code)
+                hint = redact(tail_log(), secret_values(ROOT)) or output or "启动失败，请看命令行输出"
+                return fail(hint[-800:])
+            try:
+                ready_pid = int(BOT_READY.read_text(encoding="ascii").strip())
+            except (OSError, ValueError):
+                ready_pid = None
+            if ready_pid == process.pid:
+                log.info("机器人启动完成：进程号=%d", process.pid)
+                return jsonify({"ok": True, "message": "已启动", "pid": process.pid})
+            time.sleep(0.1)
+        # The process is alive and its PID is reserved. Do not report failure and
+        # encourage another click; initialization progress remains visible in logs.
+        log.info("机器人进程仍在初始化：进程号=%d；请勿重复启动", process.pid)
+        return jsonify({
+            "ok": True,
+            "message": "机器人正在初始化，请观察命令行输出",
+            "pid": process.pid,
+        })
+    finally:
+        _bot_start_lock.release()
 
 
 @app.post("/api/stop")
