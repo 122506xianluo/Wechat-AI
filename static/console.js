@@ -6,7 +6,7 @@
   const ide = $('ide');
   const panes = [...document.querySelectorAll('[data-pane]')];
   const navItems = [...document.querySelectorAll('.nav-item')];
-  const state = {loaded: false, current: 'overview', logs: {bot: '', setup: '', panel: ''}, extra: {}, logSource: 'all', paused: false};
+  const state = {loaded: false, current: 'overview', consoleLines: [], renderedLogs: null, paused: false, refreshing: false};
   const paneInfo = {
     overview: ['运行总览', 'WORKSPACE / OVERVIEW', '你的 AI 工作空间，一切尽在掌握。'],
     model: ['模型连接', 'AI CONFIG / MODEL', '配置模型服务、密钥与连接能力。'],
@@ -188,50 +188,49 @@
   }
 
   function ingestLogs(data) {
-    state.logs = {bot: data.log || '', setup: data.setup_log || '', panel: data.panel_log || ''};
+    // Start/stop responses need not contain a console snapshot. Keep the output
+    // until the next poll; pausing output must not pause bot status updates.
+    if (state.paused || !Array.isArray(data.console_lines)) return;
+    state.consoleLines = data.console_lines.slice(-500);
     renderLogs();
-    if ($('logUpdate')) $('logUpdate').textContent = '刚刚更新 · ' + new Date().toLocaleTimeString();
+    $('logUpdate').textContent = '刚刚更新 · ' + new Date().toLocaleTimeString();
   }
-  function lineLevel(line) {
-    if (/\b(ERROR|CRITICAL|fatal|失败|错误)\b/i.test(line)) return 'error';
-    if (/\b(WARNING|WARN|warning|警告)\b/i.test(line)) return 'warn';
-    return 'info';
-  }
-  function logLines() {
-    const source = state.logSource || 'all';
-    const search = ($('logSearch')?.value || '').trim().toLowerCase();
-    const level = $('logLevel')?.value || 'all';
-    const rows = [];
-    const sources = source === 'all' ? ['bot', 'setup', 'panel'] : [source];
-    sources.forEach((name) => (state.logs[name] || '').split(/\r?\n/).filter(Boolean).forEach((text) => rows.push({source: name, text, level: lineLevel(text)})));
-    if (source === 'audit') (state.extra.audit || []).forEach((item) => rows.push({source: 'audit', text: JSON.stringify(item), level: 'info'}));
-    if (source === 'tools') (state.extra.tools || []).forEach((item) => rows.push({source: 'tools', text: JSON.stringify(item), level: item.status === 'failed' ? 'error' : 'info'}));
-    if (source === 'diagnostics') (state.extra.diagnostics || []).forEach((item) => rows.push({source: 'diagnostics', text: JSON.stringify(item), level: item.reason ? 'warn' : 'info'}));
-    return rows.filter((row) => (!search || (row.source + ' ' + row.text).toLowerCase().includes(search)) && (level === 'all' || (level === 'warn' && row.level !== 'info') || (level === 'error' && row.level === 'error')));
+  function logText() {
+    return state.consoleLines.map((row) => '[' + row.source + '] ' + row.text).join('\n');
   }
   function renderLogs() {
     const viewport = $('logViewport'); if (!viewport) return;
-    const rows = logLines(); viewport.replaceChildren();
-    if (!rows.length) { const empty = document.createElement('div'); empty.className = 'log-empty'; empty.textContent = state.paused ? '日志更新已暂停' : '没有匹配的日志'; viewport.appendChild(empty); }
-    rows.forEach((row) => { const line = document.createElement('div'); line.className = 'log-line ' + row.level; const source = document.createElement('span'); source.className = 'log-source'; source.textContent = row.source.toUpperCase(); const text = document.createElement('span'); text.textContent = row.text; line.append(source, text); viewport.appendChild(line); });
-    if ($('logCount')) $('logCount').textContent = rows.length + ' 条';
-    const selected = document.querySelector('.log-tabs [aria-selected="true"]');
-    const extra = document.querySelector('[data-log-extra="' + state.logSource + '"]');
-    const sourceLabel = extra?.textContent || selected?.textContent || '全部';
-    if ($('logSourceTitle')) $('logSourceTitle').textContent = sourceLabel + ' · 最近记录';
-    if ($('autoScroll')?.checked) viewport.scrollTop = viewport.scrollHeight;
-  }
-  async function loadExtra(source) {
-    try {
-      const path = source === 'audit' ? '/api/v1/audit' : source === 'tools' ? '/api/v1/tools/runs' : '/api/v1/members/diagnostics';
-      const data = await api(path); state.extra[source] = data.events || data.items || []; renderLogs();
-    } catch (error) { if ($('logError')) { $('logError').hidden = false; $('logError').textContent = error.message; } }
+    const signature = JSON.stringify(state.consoleLines);
+    if (signature === state.renderedLogs) return;
+    state.renderedLogs = signature;
+    const scrollTop = viewport.scrollTop;
+    const fragment = document.createDocumentFragment();
+    if (!state.consoleLines.length) {
+      const empty = document.createElement('div'); empty.className = 'log-empty';
+      empty.textContent = '等待命令行输出…'; fragment.appendChild(empty);
+    }
+    state.consoleLines.forEach((row) => {
+      const line = document.createElement('div');
+      line.className = 'log-line ' + (['error', 'warn'].includes(row.level) ? row.level : 'info');
+      // Output is untrusted text, including tracebacks and dependency messages.
+      line.textContent = '[' + row.source + '] ' + row.text;
+      fragment.appendChild(line);
+    });
+    viewport.replaceChildren(fragment);
+    $('logCount').textContent = state.consoleLines.length + ' 行';
+    viewport.scrollTop = $('autoScroll')?.checked ? viewport.scrollHeight : scrollTop;
   }
 
   async function refresh(fill = false) {
-    if (state.paused && !fill) return;
-    try { applyState(await api(fill ? '/api/state' : '/api/log'), fill); }
-    catch (error) { toast(error.message, false); if ($('connectionText')) $('connectionText').textContent = '控制台连接失败'; }
+    if (state.refreshing) return;
+    state.refreshing = true;
+    try {
+      applyState(await api(fill ? '/api/state' : '/api/log'), fill);
+      $('logError').hidden = true;
+    } catch (error) {
+      if ($('connectionText')) $('connectionText').textContent = '控制台连接失败';
+      $('logError').hidden = false; $('logError').textContent = '输出连接中断：' + error.message;
+    } finally { state.refreshing = false; }
   }
   async function clearSelectedChat() {
     const value = $('storageChat')?.value; if (!value) return toast('请先选择会话', false);
@@ -268,24 +267,27 @@
     $('statusLogToggle')?.addEventListener('click', () => toggleClass('wechat-ai-logs-collapsed', 'logs-collapsed', $('toggleLogs'), false));
     $('drawerBackdrop')?.addEventListener('click', closeDrawer);
     document.addEventListener('keydown', (event) => { if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'b') { event.preventDefault(); toggleClass('wechat-ai-nav-collapsed', 'nav-collapsed', $('toggleNav')); } if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'j') { event.preventDefault(); toggleClass('wechat-ai-logs-collapsed', 'logs-collapsed', $('toggleLogs')); } if (event.key === 'Escape') closeDrawer(); });
-    document.querySelectorAll('.log-tabs [data-log]').forEach((tab) => tab.addEventListener('click', async () => {
-      state.logSource = tab.dataset.log || 'all';
-      document.querySelectorAll('.log-tabs [data-log]').forEach((item) => { const active = item === tab; item.setAttribute('aria-selected', String(active)); item.tabIndex = active ? 0 : -1; });
-      document.querySelectorAll('[data-log-extra]').forEach((item) => item.setAttribute('aria-pressed', 'false'));
-      if (state.logSource !== 'all' && !state.logs[state.logSource]) await loadExtra(state.logSource);
-      renderLogs();
-    }));
-    document.querySelectorAll('[data-log-extra]').forEach((button) => button.addEventListener('click', async () => {
-      state.logSource = button.dataset.logExtra || 'all';
-      document.querySelectorAll('.log-tabs [data-log]').forEach((item) => { const active = item.dataset.log === 'all'; item.setAttribute('aria-selected', String(active)); item.tabIndex = active ? 0 : -1; });
-      document.querySelectorAll('[data-log-extra]').forEach((item) => item.setAttribute('aria-pressed', String(item === button)));
-      await loadExtra(state.logSource);
-      renderLogs();
-    }));
-    $('logSearch')?.addEventListener('input', renderLogs); $('logLevel')?.addEventListener('change', renderLogs); $('autoScroll')?.addEventListener('change', renderLogs);
-    $('pauseLogs')?.addEventListener('click', () => { state.paused = !state.paused; $('pauseLogs').textContent = state.paused ? '继续更新' : '暂停更新'; $('pauseLogs').setAttribute('aria-pressed', String(state.paused)); renderLogs(); });
-    $('copyLogs')?.addEventListener('click', async () => { try { await navigator.clipboard.writeText(logLines().map((row) => '[' + row.source + '] ' + row.text).join('\n')); toast('已复制当前日志'); } catch { toast('浏览器禁止访问剪贴板', false); } });
-    $('downloadLogs')?.addEventListener('click', () => { const blob = new Blob([logLines().map((row) => '[' + row.source + '] ' + row.text).join('\n')], {type: 'text/plain;charset=utf-8'}); const link = document.createElement('a'); link.href = URL.createObjectURL(blob); link.download = 'wechat-ai-log-' + new Date().toISOString().slice(0, 10) + '.txt'; link.click(); URL.revokeObjectURL(link.href); });
+    $('autoScroll')?.addEventListener('change', () => {
+      if ($('autoScroll').checked) $('logViewport').scrollTop = $('logViewport').scrollHeight;
+    });
+    $('pauseLogs')?.addEventListener('click', () => {
+      state.paused = !state.paused;
+      $('pauseLogs').textContent = state.paused ? '继续更新' : '暂停更新';
+      $('pauseLogs').setAttribute('aria-pressed', String(state.paused));
+      $('logLiveDot').classList.toggle('paused', state.paused);
+      if (state.paused) $('logUpdate').textContent = '输出已暂停 · 机器人状态仍在更新';
+      else refresh(false);
+    });
+    $('copyLogs')?.addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(logText()); toast('已复制当前命令行输出'); }
+      catch { toast('浏览器禁止访问剪贴板', false); }
+    });
+    $('downloadLogs')?.addEventListener('click', () => {
+      const blob = new Blob([logText()], {type: 'text/plain;charset=utf-8'});
+      const link = document.createElement('a'); link.href = URL.createObjectURL(blob);
+      link.download = 'wechat-ai-console-' + new Date().toISOString().slice(0, 10) + '.txt';
+      link.click(); setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+    });
     document.querySelectorAll('.text-link, .quick-card').forEach((link) => link.addEventListener('click', (event) => { const hash = link.getAttribute('href')?.slice(1); if (paneInfo[hash]) { event.preventDefault(); setView(hash); } }));
     const hash = location.hash.slice(1); setView(paneInfo[hash] ? hash : 'overview', false);
     refresh(true).catch(() => {}); setInterval(() => refresh(false), 2000);

@@ -1,5 +1,6 @@
 """Small, read-only, policy checked tool registry. No eval, shell or generic I/O."""
 
+import logging
 import ast
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -161,6 +162,9 @@ class Tools:
                 "sha256": sha256(arguments.encode()).hexdigest(),
             }
         )
+        label = {"get_current_time": "读取时间", "calculate": "计算器",
+                 "search_knowledge": "知识库检索", "get_current_conversation_info": "当前会话信息"}.get(name, "未授权工具")
+        logging.getLogger("minimal_wechat_ai").info("只读工具调用开始：任务=%s，工具=%s", job["id"][:8], label)
         try:
             if len(arguments.encode()) > 4096:
                 raise ValueError("tool_arguments_over_4KiB")
@@ -235,6 +239,11 @@ class Tools:
             status = type(exc).__name__
             return json.dumps({"error": status})
         finally:
+            logging.getLogger("minimal_wechat_ai").log(
+                logging.INFO if status == "ok" else logging.WARNING,
+                "只读工具调用结束：任务=%s，工具=%s，结果=%s，耗时=%d毫秒",
+                job["id"][:8], label, "成功" if status == "ok" else "失败（" + status + "）",
+                int((time.monotonic() - start) * 1000))
             with self.storage.transaction() as c:
                 c.execute(
                     "INSERT INTO tool_runs(job_id,principal_id,scope_id,tool_name,argument_summary,status,duration_ms) VALUES(?,?,?,?,?,?,?)",

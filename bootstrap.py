@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import datetime as dt
+import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
+
+from runtime_logging import redact, secret_values
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
@@ -14,7 +17,7 @@ VENV_PYTHON = ROOT / ".venv" / "Scripts" / "python.exe"
 
 def write_log(message: str):
     DATA.mkdir(exist_ok=True)
-    line = f"{dt.datetime.now():%Y-%m-%d %H:%M:%S} {message}"
+    line = redact(f"{dt.datetime.now():%Y-%m-%d %H:%M:%S} 信息 {message}", secret_values(ROOT))
     with SETUP_LOG.open("a", encoding="utf-8") as handle:
         handle.write(line + "\n")
     print(line, flush=True)
@@ -92,13 +95,24 @@ def main() -> int:
     else:
         write_log("虚拟环境已存在，跳过创建")
 
-    if run([str(VENV_PYTHON), "-m", "pip", "install", "-r", str(ROOT / "requirements.txt")], "安装或检查依赖") != 0:
+    if run([str(VENV_PYTHON), "-X", "utf8", "-u", "-m", "pip", "install", "-r", str(ROOT / "requirements.txt")], "安装或检查依赖") != 0:
         return 1
 
     ensure_file(ROOT / ".env.example", ROOT / ".env")
     ensure_file(ROOT / "config.example.json", ROOT / "config.json")
     write_log("安装准备完成，正在打开 Web 控制台")
-    return subprocess.call([str(VENV_PYTHON), str(ROOT / "app.py")], cwd=str(ROOT))
+    env = os.environ.copy()
+    env.update(PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1", WECHAT_AI_LOG_STDIO="1")
+    # Include errors that happen before Flask/application logging can initialize.
+    with (DATA / "panel.log").open("ab", buffering=0) as output:
+        code = subprocess.call([str(VENV_PYTHON), "-X", "utf8", "-u", str(ROOT / "app.py")],
+                               cwd=str(ROOT), env=env, stdin=subprocess.DEVNULL,
+                               stdout=output, stderr=subprocess.STDOUT)
+    if code:
+        write_log(f"控制台异常退出，退出码={code}，请查看 data/panel.log")
+    else:
+        write_log("控制台进程已退出")
+    return code
 
 
 if __name__ == "__main__":

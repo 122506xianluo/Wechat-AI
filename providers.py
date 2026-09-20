@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from hashlib import sha256
+import logging
 import json
 import os
 import time
@@ -101,6 +102,9 @@ class Capabilities:
             require_manager(c, actor, owner=True)
         target = endpoint(name, self.llm, root=self.storage.root)
         error = None
+        started = time.monotonic()
+        label = {"vision": "图片理解", "tools": "工具调用", "embeddings": "向量嵌入", "transcription": "语音转写"}[name]
+        logging.getLogger("minimal_wechat_ai").info("模型能力测试开始：能力=%s", label)
         try:
             with httpx.Client(timeout=45, follow_redirects=False) as client:
                 if name == "embeddings":
@@ -205,6 +209,9 @@ class Capabilities:
                 target_id=name,
                 details={"supported": error is None, "error": error},
             )
+        logging.getLogger("minimal_wechat_ai").log(logging.INFO if error is None else logging.WARNING,
+            "模型能力测试结束：能力=%s，结果=%s，耗时=%.2f秒", label,
+            "可用" if error is None else "不可用（" + error + "）", time.monotonic() - started)
         return {"name": name, "supported": error is None, "error": error}
 
 

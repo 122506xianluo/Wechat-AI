@@ -4,6 +4,7 @@ from collections import Counter
 from hashlib import sha256
 import json
 import logging
+from runtime_logging import reason_text
 import time
 from permissions import Permissions, normalize_name
 from roles import require_manager
@@ -86,10 +87,10 @@ class Members:
             count += 1
             if time.monotonic() - last >= 60:
                 logging.getLogger("minimal_wechat_ai").warning(
-                    "sender_skipped chat_id=%s reason=%s method=%s count=%s",
+                    "群成员暂未处理：群编号=%s，原因=%s，识别方式=%s，累计=%s次",
                     chat_id,
-                    reason,
-                    method[:40],
+                    reason_text(reason),
+                    "资料卡昵称" if method == "profile_card_nickname" else method[:40],
                     count,
                 )
                 count, last = 0, time.monotonic()

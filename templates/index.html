@@ -66,15 +66,12 @@
       <footer class="workspace-footer"><span>WeChat AI Workspace</span><span>本地运行 · 会话隔离 · 简单可控</span></footer>
     </div>
   </main>
-  <aside class="log-panel" id="logPanel" aria-label="实时日志">
-    <header class="log-heading"><div>{{ icon('terminal') }}<strong>输出日志</strong><span class="live-dot" id="logLiveDot"></span></div><button class="icon-button" id="closeLogs" type="button" title="折叠日志栏" aria-label="折叠日志栏">{{ icon('right') }}</button></header>
-    <div class="log-tabs" role="tablist" aria-label="日志来源"><button role="tab" id="tab-all" data-log="all" aria-selected="true" aria-controls="logViewport">全部</button><button role="tab" id="tab-bot" data-log="bot" aria-selected="false" aria-controls="logViewport" tabindex="-1">运行</button><button role="tab" id="tab-setup" data-log="setup" aria-selected="false" aria-controls="logViewport" tabindex="-1">安装</button><button role="tab" id="tab-panel" data-log="panel" aria-selected="false" aria-controls="logViewport" tabindex="-1">控制台</button></div>
-    <div class="log-filter"><label class="log-search">{{ icon('search') }}<input id="logSearch" type="search" placeholder="筛选日志…" aria-label="筛选日志关键词"></label><select id="logLevel" aria-label="日志等级"><option value="all">所有等级</option><option value="warn">警告及错误</option><option value="error">仅错误</option></select></div>
-    <div class="log-sources"><span>更多来源</span><button data-log-extra="audit" type="button" aria-pressed="false">审计</button><button data-log-extra="tools" type="button" aria-pressed="false">工具</button><button data-log-extra="diagnostics" type="button" aria-pressed="false">诊断</button></div>
-    <div class="log-toolbar"><button type="button" id="pauseLogs" aria-pressed="false">暂停更新</button><label><input id="autoScroll" type="checkbox" checked>自动滚动</label><span class="toolbar-spacer"></span><button class="icon-button" id="copyLogs" type="button" title="复制筛选后的日志" aria-label="复制筛选后的日志">{{ icon('copy') }}</button><button class="icon-button" id="downloadLogs" type="button" title="导出当前日志片段" aria-label="导出当前日志片段">{{ icon('download') }}</button></div>
-    <div class="log-caption"><span id="logSourceTitle">全部来源 · 最近记录</span><span id="logCount">0 条</span></div>
+  <aside class="log-panel" id="logPanel" aria-label="命令行输出">
+    <header class="log-heading"><div>{{ icon('terminal') }}<strong id="consoleTitle">命令行输出</strong><span class="live-dot" id="logLiveDot"></span></div><button class="icon-button" id="closeLogs" type="button" title="折叠输出栏" aria-label="折叠输出栏">{{ icon('right') }}</button></header>
+    <div class="log-toolbar"><button type="button" id="pauseLogs" aria-pressed="false">暂停更新</button><label><input id="autoScroll" type="checkbox" checked>跟随滚动</label><span class="toolbar-spacer"></span><button class="icon-button" id="copyLogs" type="button" title="复制当前输出" aria-label="复制当前输出">{{ icon('copy') }}</button><button class="icon-button" id="downloadLogs" type="button" title="导出当前输出片段" aria-label="导出当前输出片段">{{ icon('download') }}</button></div>
+    <div class="log-caption"><span>安装 · 控制台 · 机器人 / 最近 500 行</span><span id="logCount">0 行</span></div>
     <div id="logError" class="log-error" role="status" hidden></div>
-    <div class="log-viewport" id="logViewport" role="tabpanel" aria-labelledby="tab-all" tabindex="0"><div class="log-empty">{{ icon('terminal') }}<strong>等待日志</strong><span>连接成功后，运行记录会显示在这里。</span></div></div>
+    <div class="log-viewport" id="logViewport" role="region" aria-labelledby="consoleTitle" tabindex="0"><div class="log-empty">{{ icon('terminal') }}<strong>等待命令行输出</strong><span>安装、管理操作和消息处理流程会按时间显示在这里。</span></div></div>
     <footer class="log-footer"><span id="logUpdate">等待连接…</span><span>只读输出</span></footer>
   </aside>
   <footer class="statusbar"><div><span class="connection-dot" id="statusConnection"></span><span id="connectionText">正在连接</span><span class="status-separator">/</span><span class="mono" id="statusSchema">SQLite</span></div><div><span id="saveStatus">配置未读取</span><span class="status-separator">/</span><span class="mono">UTF-8</span><button type="button" id="statusLogToggle" aria-controls="logPanel">{{ icon('terminal') }}日志</button></div></footer>

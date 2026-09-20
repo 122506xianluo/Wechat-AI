@@ -2,6 +2,7 @@
 
 from array import array
 from hashlib import sha256
+import logging
 import json
 import math
 import re
@@ -352,9 +353,11 @@ class Knowledge:
                                 k: row[k] for k in row.keys() if k != "vector"
                             }
                 ranked.append([cid for _, cid in sorted(scores, reverse=True)[:30]])
-            except Exception:
+            except Exception as exc:
                 # Explicit fallback; FTS remains available without provider support.
-                pass
+                logging.getLogger("minimal_wechat_ai").warning(
+                    "知识库向量检索暂不可用：聊天编号=%s，类型=%s，已回退 SQLite 全文检索",
+                    chat_id, type(exc).__name__)
         fused = {}
         for ranking in ranked:
             for index, cid in enumerate(ranking):
@@ -410,6 +413,8 @@ class Knowledge:
                 "SELECT k.id,k.content FROM knowledge_chunks k LEFT JOIN knowledge_embeddings e ON e.chunk_id=k.id AND e.model_fingerprint=? WHERE k.document_id=? AND e.chunk_id IS NULL ORDER BY k.ordinal LIMIT 16",
                 (target.fingerprint, did),
             ).fetchall()
+        logging.getLogger("minimal_wechat_ai").info(
+            "知识库索引批次开始：文档编号=%s，片段数=%d，尝试=%d/3", did, len(rows), job["attempts"] + 1)
         try:
             if rows:
                 with httpx.Client(timeout=60, follow_redirects=False) as client:
@@ -441,6 +446,8 @@ class Knowledge:
                         "UPDATE knowledge_documents SET status='vector_ready' WHERE id=?",
                         (did,),
                     )
+            logging.getLogger("minimal_wechat_ai").info(
+                "知识库索引批次完成：文档编号=%s，状态=%s", did, "全部完成" if state == "completed" else "等待下一批")
             return True
         except Exception as exc:
             attempts = job["attempts"] + 1
@@ -465,6 +472,9 @@ class Knowledge:
                         owner,
                     ),
                 )
+            logging.getLogger("minimal_wechat_ai").warning(
+                "知识库索引失败：文档编号=%s，类型=%s，后续=%s", did, type(exc).__name__,
+                "待人工检查" if state == "needs_review" else "等待重试")
             return False
 
     def reindex(self, did, actor):

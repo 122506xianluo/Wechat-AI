@@ -3,6 +3,7 @@
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
+import logging
 import base64
 import io
 import re
@@ -308,6 +309,8 @@ class Media:
                         "transcription"
                     ):
                         raise UnsupportedMedia("请先配置并检查语音转写能力")
+                    transcribe_started = time.monotonic()
+                    logging.getLogger("minimal_wechat_ai").info("开始调用语音转写：任务=%s，附件=%s", job["id"][:8], aid[:8])
                     with httpx.Client(timeout=90, follow_redirects=False) as client:
                         extracted = transcribe(
                             endpoint("transcription", self.llm, root=self.storage.root),
@@ -316,6 +319,8 @@ class Media:
                             client=client,
                         )
                     method = "transcription"
+                    logging.getLogger("minimal_wechat_ai").info(
+                        "语音转写完成：任务=%s，提取字符数=%d，耗时=%.2f秒", job["id"][:8], len(extracted), time.monotonic() - transcribe_started)
                 else:
                     parts = extract_document(raw, row["original_name"])
                     extracted = "\n".join(
@@ -378,4 +383,6 @@ class Media:
                 )
                 count += 1
         self.last_cleanup = now
+        if count:
+            logging.getLogger("minimal_wechat_ai").info("过期附件清理完成：已清理=%d个，保留元数据记录", count)
         return count

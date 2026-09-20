@@ -9,7 +9,6 @@ from pathlib import Path
 import secrets
 import socket
 import subprocess
-import sys
 import threading
 import time
 import traceback
@@ -23,6 +22,9 @@ from bot import Config, LLMSettings
 from permissions import LOCAL_OWNER, PermissionDenied, Permissions
 from storage import Storage
 from admin_api import register_admin
+from runtime_logging import configure_logging, merge_console, redact, secret_values, tail_file
+
+log = logging.getLogger("wechat_ai.panel")
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
@@ -218,33 +220,46 @@ def settings_from_payload(data: dict) -> LLMSettings:
     return settings
 
 
-def tail_file(path: Path, max_lines: int = 160) -> str:
-    if not path.exists():
-        return ""
-    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    return "\n".join(lines[-max_lines:])
-
-
 def tail_log(max_lines: int = 160) -> str:
-    return tail_file(LOG_FILE, max_lines)
+    return redact(tail_file(LOG_FILE, max_lines), secret_values(ROOT))
 
 
 def setup_log(max_lines: int = 160) -> str:
-    return tail_file(SETUP_LOG, max_lines)
+    return redact(tail_file(SETUP_LOG, max_lines), secret_values(ROOT))
 
 
 def panel_log(max_lines: int = 160) -> str:
-    return tail_file(PANEL_LOG, max_lines)
+    return redact(tail_file(PANEL_LOG, max_lines), secret_values(ROOT))
+
+
+def console_payload():
+    paths = {"bot": LOG_FILE, "setup": SETUP_LOG, "panel": PANEL_LOG}
+    secrets_in_env = secret_values(ROOT)
+    snapshots = {key: redact(tail_file(path), secrets_in_env) for key, path in paths.items()}
+    return {
+        "log": snapshots["bot"], "setup_log": snapshots["setup"], "panel_log": snapshots["panel"],
+        "console_lines": merge_console(snapshots, paths, secrets=secrets_in_env),
+    }
+
+
+def bot_process_env():
+    env = os.environ.copy()
+    env.update(PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1", WECHAT_AI_LOG_STDIO="1")
+    return env
 
 
 def run_check():
+    log.info("配置检查开始（不会操作微信或调用模型）")
     result = subprocess.run(
-        [str(venv_python(False)), "-X", "utf8", str(ROOT / "bot.py"), "--check"],
-        cwd=str(ROOT), capture_output=True, text=True,
-        encoding="utf-8", errors="replace", creationflags=CREATE_NO_WINDOW)
-    output = (result.stderr or result.stdout or "").strip()
+        [str(venv_python(False)), "-X", "utf8", "-u", str(ROOT / "bot.py"), "--check"],
+        cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        encoding="utf-8", errors="replace", creationflags=CREATE_NO_WINDOW,
+        env=bot_process_env())
+    output = redact((result.stdout or "").strip(), secret_values(ROOT))
+    if output:
+        log.log(logging.INFO if result.returncode == 0 else logging.ERROR, "配置检查输出：\n%s", output)
+    log.info("配置检查结束：%s，退出码=%d", "通过" if result.returncode == 0 else "未通过", result.returncode)
     return result.returncode == 0, output
-
 
 
 @app.before_request
@@ -254,6 +269,7 @@ def enforce_local_owner():
     This is local desktop administration, not a multi-account web service.
     Never trust forwarded headers or allow remote network binding.
     """
+    g.request_started = time.monotonic()
     try:
         host = urlsplit(request.host_url)
         valid_host = (host.hostname == "127.0.0.1" and host.scheme == "http"
@@ -280,8 +296,32 @@ def enforce_local_owner():
             return fail('请求必须是 JSON 对象',400)
 
 
+def operation_label(route):
+    labels = {
+        "save": "保存配置", "test": "测试连接", "start": "启动机器人", "stop": "停止机器人",
+        "chats": "聊天管理", "current-group": "读取当前群名", "users": "用户权限",
+        "roles": "角色设置", "rollback": "回滚版本", "delete": "删除", "bind": "绑定",
+        "members": "群成员管理", "merge": "合并身份", "sync-members": "同步群成员",
+        "contexts": "上下文管理", "context-mode": "上下文模式", "clear": "清空",
+        "storage": "数据持久化", "clear-chat": "清空指定会话", "clear-all": "清空全部会话",
+        "principals": "身份管理", "status": "修改状态", "permissions": "权限设置",
+        "backups": "创建数据库备份", "queue": "队列人工操作", "attachments": "附件管理",
+        "capabilities": "模型能力检查", "knowledge-bases": "知识库管理",
+        "knowledge-documents": "知识文档", "documents": "文档", "promote": "将附件加入知识库",
+        "bindings": "授权绑定", "reindex": "重建索引", "tools": "只读工具设置",
+    }
+    return " / ".join(labels[part] for part in route.split("/") if part in labels) or "本地管理"
+
+
 @app.after_request
 def local_security_headers(response):
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        # Log the route template, never query strings, request bodies or secrets.
+        route = str(request.url_rule) if request.url_rule else "未匹配接口"
+        log.log(logging.INFO if response.status_code < 400 else logging.WARNING,
+                "管理操作%s：功能=%s，接口=%s，状态码=%d，耗时=%.2f秒",
+                "完成" if response.status_code < 400 else "未完成", operation_label(route), route,
+                response.status_code, time.monotonic() - getattr(g, "request_started", time.monotonic()))
     response.headers["Cache-Control"] = "no-store"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-Content-Type-Options"] = "nosniff"
@@ -301,7 +341,7 @@ def management_error(exc):
         return fail(str(exc), 403)
     if isinstance(exc, (ValueError, TypeError)):
         return fail(str(exc), 400)
-    logging.exception("management_error type=%s", type(exc).__name__)
+    log.exception("管理操作异常：类型=%s", type(exc).__name__)
     return fail("管理操作失败，请查看本机日志", 500)
 
 
@@ -390,9 +430,7 @@ def api_state():
         "llm_model": env.get("LLM_MODEL", ""),
         "llm_api_key_set": bool(env.get("LLM_API_KEY", "")),
         "llm_api_key_masked": mask_secret(env.get("LLM_API_KEY", "")),
-        "log": tail_log(),
-        "setup_log": setup_log(),
-        "panel_log": panel_log(),
+        **console_payload(),
         "url": URL,
         "storage": storage_state(),
     })
@@ -405,9 +443,7 @@ def api_log():
         "running": bot_running(),
         "pid": read_pid(BOT_PID),
         "stop_requested": STOP_FILE.exists(),
-        "log": tail_log(),
-        "setup_log": setup_log(),
-        "panel_log": panel_log(),
+        **console_payload(),
         "storage": storage_state(),
     })
 
@@ -452,6 +488,7 @@ def api_storage_clear_all():
 
 @app.post("/api/save")
 def api_save():
+    log.info("收到保存配置请求")
     if bot_running():
         return fail("请先停止，再保存配置")
     data = request.get_json(silent=True) or {}
@@ -463,6 +500,7 @@ def api_save():
         ok, output = run_check()
         if not ok:
             return fail(output or "配置检查未通过")
+        log.info("配置已保存，下次启动机器人生效；密钥不写入日志")
         return jsonify({"ok": True, "message": "已保存，下次启动生效", "restart_required": True})
     except Exception as exc:
         return fail(str(exc))
@@ -470,6 +508,8 @@ def api_save():
 
 @app.post("/api/test")
 def api_test():
+    started = time.monotonic()
+    log.info("模型连接测试开始")
     data = request.get_json(silent=True) or {}
     try:
         settings = settings_from_payload(data)
@@ -486,16 +526,20 @@ def api_test():
                     "temperature": 0,
                 })
         if response.status_code >= 400:
+            log.warning("模型连接测试失败：HTTP %d，上游正文已隐藏", response.status_code)
             return fail("模型接口 HTTP %s（上游正文已隐藏）" % response.status_code)
         payload = response.json()
         text = (((payload.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
+        log.info("模型连接测试完成：耗时=%.2f秒，回复字符数=%d", time.monotonic() - started, len(text))
         return jsonify({"ok": True, "message": "模型可用", "reply": text[:200] or "(空回复)"})
     except Exception as exc:
+        log.warning("模型连接测试异常：类型=%s，耗时=%.2f秒", type(exc).__name__, time.monotonic() - started)
         return fail(str(exc))
 
 
 @app.post("/api/start")
 def api_start():
+    log.info("收到启动机器人请求")
     if g.actor.access_level != "owner":
         return fail("启动并保存配置仅允许本机控制台操作", 403)
     if bot_running():
@@ -515,10 +559,16 @@ def api_start():
     ok, output = run_check()
     if not ok:
         return fail(output or "配置检查未通过")
-    subprocess.Popen(
-        [str(venv_python(True)), str(ROOT / "bot.py")],
-        cwd=str(ROOT), close_fds=True, creationflags=DETACHED,
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    DATA.mkdir(exist_ok=True)
+    # The child logs only to stderr in this mode. Both native output streams go
+    # to one file, including failures before Python logging can initialize.
+    with LOG_FILE.open("ab", buffering=0) as output_file:
+        process = subprocess.Popen(
+            [str(venv_python(False)), "-X", "utf8", "-u", str(ROOT / "bot.py")],
+            cwd=str(ROOT), close_fds=True, creationflags=DETACHED,
+            env=bot_process_env(), stdin=subprocess.DEVNULL,
+            stdout=output_file, stderr=subprocess.STDOUT)
+    log.info("机器人进程已创建：进程号=%d，标准输出和错误输出已接入命令行面板", process.pid)
     deadline = time.monotonic() + 3.0
     while time.monotonic() < deadline:
         if bot_running():
@@ -529,12 +579,14 @@ def api_start():
                 "log": tail_log(),
             })
         time.sleep(0.1)
-    hint = tail_log() or output or "启动失败，请看日志"
+    log.warning("尚未收到机器人启动确认，请查看命令行输出")
+    hint = redact(tail_log(), secret_values(ROOT)) or output or "启动失败，请看日志"
     return fail(hint[-500:])
 
 
 @app.post("/api/stop")
 def api_stop():
+    log.info("收到停止机器人请求")
     if not bot_running():
         STOP_FILE.write_text("stop\n", encoding="ascii")
         return jsonify({"ok": True, "message": "当前未运行"})
@@ -542,8 +594,10 @@ def api_stop():
     deadline = time.monotonic() + 20.0
     while time.monotonic() < deadline:
         if not bot_running():
+            log.info("机器人已停止")
             return jsonify({"ok": True, "message": "已停止", "log": tail_log()})
         time.sleep(0.2)
+    log.info("停止信号已写入，正在等待当前任务安全退出")
     return jsonify({
         "ok": True,
         "message": "已请求停止，可能在等当前回复结束",
@@ -610,6 +664,7 @@ def dump_error(exc=None):
     DATA.mkdir(exist_ok=True)
     text_err = traceback.format_exc() if exc is None else "".join(
         traceback.format_exception(type(exc), exc, exc.__traceback__))
+    text_err = redact(text_err, secret_values(ROOT))
     (DATA / "panel_error.log").write_text(text_err, encoding="utf-8")
     try:
         print(text_err)
@@ -625,17 +680,13 @@ for _name in ("state", "start", "stop", "test", "log"):
 
 def main() -> int:
     DATA.mkdir(exist_ok=True)
-    if sys.stdout is None:
-        sys.stdout = open(PANEL_LOG, "a", encoding="utf-8", buffering=1)
-    if sys.stderr is None:
-        sys.stderr = sys.stdout
-    logging.basicConfig(
-        filename=PANEL_LOG, level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s", encoding="utf-8")
+    configure_logging(ROOT, "panel.log", stdio_only=os.getenv("WECHAT_AI_LOG_STDIO") == "1",
+                      capture_stdio=True)
+    log.info("控制台启动，正在检查本地运行环境")
     existing = live_panel_url()
     if existing:
         set_bind(int(existing.rsplit(":", 1)[-1]))
-        print("控制台已在运行：" + existing)
+        log.info("控制台已在运行：%s", existing)
         webbrowser.open(existing)
         return 0
     set_bind(pick_port())
@@ -652,8 +703,8 @@ def main() -> int:
             pass
 
     atexit.register(cleanup)
-    print("控制台：" + URL)
-    print("关闭本窗口会停止控制台，不会自动停止微信回复。")
+    log.info("控制台地址：%s（仅允许本机访问）", URL)
+    log.info("命令行输出已接入：安装、控制台、机器人；关闭此进程不会自动停止微信回复")
     threading.Thread(target=wait_and_open, daemon=True).start()
     app.run(host=HOST, port=PORT, debug=False, use_reloader=False, threaded=True)
     return 0

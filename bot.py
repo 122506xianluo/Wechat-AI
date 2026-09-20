@@ -13,7 +13,6 @@ import logging
 import os
 from pathlib import Path
 import re
-import sys
 import time
 import unicodedata
 from urllib.parse import urlparse
@@ -24,6 +23,7 @@ from permissions import Permissions
 from storage import Storage
 from roles import Roles
 from chats import Chats
+from runtime_logging import configure_logging as configure_runtime_logging, reason_text
 
 import httpx
 from dotenv import load_dotenv
@@ -566,8 +566,8 @@ class WeChatDesktop:
             self._chat_skip_log[key] = (last, suppressed + 1)
             return
         log.info(
-            "chat_skipped chat=%r reason=%s detail=%r suppressed=%d",
-            session.name, reason, detail, suppressed,
+            "暂跳过聊天：聊天=%r，原因=%s，详情=%r，已合并同类提示=%d次",
+            session.name, reason_text(reason), detail, suppressed,
         )
         self._chat_skip_log[key] = (now, 0)
 
@@ -791,19 +791,33 @@ class WeChatDesktop:
         """Click an incoming avatar, read its profile name, then close the card."""
         started = time.monotonic()
         diagnostics["strategy"] = "profile_card_nickname"
+
+        def report(name, method, confidence):
+            elapsed = round((time.monotonic() - started) * 1000)
+            diagnostics["elapsed_ms"] = elapsed
+            if name:
+                log.info("资料卡处理完成：群=%r，昵称=%r，资料卡已关闭，耗时=%d毫秒",
+                         chat_name, name, elapsed)
+            else:
+                result = diagnostics.get("close_result") if diagnostics.get("close_result") == "profile_still_open" else diagnostics.get("result", diagnostics.get("avatar_result", "profile_name_missing"))
+                log.warning("资料卡读取未完成：群=%r，原因=%s，识别代码=%s，耗时=%d毫秒",
+                            chat_name, reason_text(result), method, elapsed)
+            return name, method, confidence
+
         point = self._incoming_avatar_point(row, diagnostics)
         if point is None:
-            return "", "profile_card_avatar_missing", 0.0
+            return report("", "profile_card_avatar_missing", 0.0)
         self.require_foreground()
         if not self.current_matches(chat_name, "group"):
             diagnostics["result"] = "chat_changed_before_profile"
-            return "", "profile_card_chat_changed", 0.0
+            return report("", "profile_card_chat_changed", 0.0)
 
         card = None
         sender = ""
         try:
             from pywinauto import mouse
 
+            log.info("打开资料卡：群=%r，仅读取第一项昵称", chat_name)
             mouse.click(button="left", coords=point)
             card = self._profile_card(1.0)
             if card is None:
@@ -848,17 +862,17 @@ class WeChatDesktop:
 
         if not sender:
             result = str(diagnostics.get("result", "profile_name_missing"))
-            return "", ("profile_card_" + result)[:40], 0.0
+            return report("", ("profile_card_" + result)[:40], 0.0)
         try:
             self.require_foreground()
             if not self.current_matches(chat_name, "group"):
                 diagnostics["result"] = "chat_changed_after_profile"
-                return "", "profile_card_chat_changed", 0.0
+                return report("", "profile_card_chat_changed", 0.0)
         except BotError:
             diagnostics["result"] = "chat_unverified_after_profile"
-            return "", "profile_card_chat_unverified", 0.0
+            return report("", "profile_card_chat_unverified", 0.0)
         diagnostics["result"] = "profile_name_read"
-        return sender, "profile_card_nickname", 0.98
+        return report(sender, "profile_card_nickname", 0.98)
 
     def _configured_names(self) -> set[str]:
         return set(self.cfg.private_chats) | set(self.cfg.groups)
@@ -959,9 +973,12 @@ class WeChatDesktop:
                     direction, verified = "unknown", False
                 if direction != "incoming":
                     if direction == "unknown":
-                        log.warning("identity_skipped reason=direction_unknown kind=%s", kind)
+                        log.warning("跳过消息：聊天=%r，类型=%s，无法确认消息来自对方", session.name, "群聊" if kind == "group" else "私聊")
                     continue
 
+                log.info("发现触发消息：聊天=%r，类型=%s，内容=%s，字符数=%d；不记录正文",
+                         session.name, "群聊" if kind == "group" else "私聊",
+                         "附件" if attachment else "文字", len(text))
                 sender = session.name if kind == "private" else ""
                 if kind == "group":
                     try:
@@ -979,6 +996,7 @@ class WeChatDesktop:
                     except Exception as exc:
                         method, confidence, sender = "sender_pipeline_exception", 0.0, ""
                         sender_features["pipeline_error"] = type(exc).__name__
+                        log.warning("发送者识别异常：群=%r，类型=%s", session.name, type(exc).__name__)
                 self.require_foreground()
                 candidate = Message(
                     uuid.uuid4().hex, session.name, kind, text, source_key=source_key,
@@ -1092,10 +1110,10 @@ class WeChatDesktop:
                 time.sleep(.1)
             if not confirmed or edit.window_text() != "":
                 log.warning(
-                    "send_verification_unknown new_rows=%d text_matches=%d "
-                    "directions=%s input_empty=%s",
-                    last_new_count, last_text_matches, last_directions,
-                    edit.window_text() == "",
+                    "发送核验未通过：新消息行=%d，正文匹配行=%d，消息方向=%s，输入框为空=%s",
+                    last_new_count, last_text_matches,
+                    { {"incoming": "对方发出", "outgoing": "自己发出", "unknown": "未确认"}.get(k, k): v for k, v in last_directions.items()},
+                    "是" if edit.window_text() == "" else "否",
                 )
                 raise SendUncertain("未核验到新出站消息，需人工确认")
         except SendUncertain:
@@ -1180,6 +1198,7 @@ class Bot:
                  desktop=None, llm=None, storage=None):
         self.root, self.cfg = root, cfg
         self.storage = storage if storage is not None else Storage(root)
+        log.info("SQLite 已就绪：上下文、身份与任务均使用本地持久化数据")
         self.chats = Chats(self.storage)
         self.chats.import_legacy(cfg.private_chats, cfg.groups)
         self.permissions = Permissions(self.storage)
@@ -1228,12 +1247,12 @@ class Bot:
         focused_since = None
         last_ui_error = None
         last_ui_error_at = 0.0
-        log.info("started mode=LIVE no_rate_limit=true")
-        log.info("请让微信在虚拟机内保持前台；宿主机可正常使用")
+        log.info("机器人已启动：自动回复模式，不设置每分钟回复限制")
+        log.info("请让微信在虚拟机内保持前台；宿主机可正常使用。正在等待可用的微信界面")
         while not self.stopped():
             if not self.desktop.is_foreground():
                 if ready:
-                    log.info("paused reason=wechat_not_guest_foreground")
+                    log.info("监测暂停：微信不在前台，已完成上下文保留在 SQLite")
                 ready = False
                 focused_since = None
                 time.sleep(.25)
@@ -1245,10 +1264,12 @@ class Bot:
                     if time.monotonic() - focused_since < 1.0:
                         time.sleep(.1)
                         continue
+                    if last_ui_error is None:
+                        log.info("正在建立微信消息基线：只处理后续新消息，不补发界面旧消息")
                     self.desktop.warmup()
                     ready = True
                     last_ui_error = None
-                    log.info("ready history_rebaselined=true")
+                    log.info("消息监测已就绪：界面基线已更新，SQLite 对话上下文保持不变")
                 messages = self.desktop.poll()
                 self.engine.observe_batch(messages)
                 self.engine.tick()
@@ -1256,8 +1277,7 @@ class Bot:
                 ready = False
                 focused_since = None
                 log.info(
-                    "paused reason=focus_lost message_baseline_will_rebuild=true "
-                    "sqlite_context_preserved=true"
+                    "监测暂停：微信失去焦点；恢复前台后重建界面消息基线，SQLite 上下文不会清空"
                 )
                 time.sleep(.25)
                 continue
@@ -1270,9 +1290,7 @@ class Bot:
                 now = time.monotonic()
                 if detail != last_ui_error or now - last_ui_error_at >= 60.0:
                     log.warning(
-                        "paused reason=wechat_ui_temporarily_unavailable "
-                        "detail=%r message_baseline_will_rebuild=true "
-                        "sqlite_context_preserved=true",
+                        "监测暂缓：微信界面暂时不可读，详情=%r；将自动重建界面基线，SQLite 上下文保留",
                         detail,
                     )
                     last_ui_error = detail
@@ -1280,29 +1298,18 @@ class Bot:
                 time.sleep(.25)
                 continue
             time.sleep(self.cfg.poll_seconds)
-        log.info("stopped STOP file detected")
+        log.info("收到停止信号，消息扫描已结束，正在等待后台任务安全退出")
 
     def close(self):
         self.engine.close()
         self.llm.close()
         self.storage.close()
+        log.info("机器人已安全停止，已关闭模型连接和数据库连接")
 
 
 def configure_logging(root: Path):
-    (root / "data").mkdir(exist_ok=True)
-    formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
-    root_logger = logging.getLogger()
-    root_logger.setLevel(logging.INFO)
-    root_logger.handlers.clear()
-    file_handler = logging.FileHandler(root / "data" / "bot.log", encoding="utf-8")
-    file_handler.setFormatter(formatter)
-    root_logger.addHandler(file_handler)
-    if sys.stdout is not None:
-        stream = logging.StreamHandler()
-        stream.setFormatter(formatter)
-        root_logger.addHandler(stream)
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    configure_runtime_logging(root, "bot.log", stdio_only=os.getenv("WECHAT_AI_LOG_STDIO") == "1",
+                              capture_stdio=True)
 
 
 def main(argv=None) -> int:
@@ -1342,11 +1349,9 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except KeyboardInterrupt:
-        log.info("stopped keyboard_interrupt=true")
+        log.info("收到键盘中断，机器人退出")
         raise SystemExit(130)
     except Exception as exc:
-        log.exception("fatal type=%s", type(exc).__name__)
-        if sys.stderr is not None:
-            print(f"错误：{exc}", file=sys.stderr)
+        log.exception("机器人异常退出：类型=%s", type(exc).__name__)
         raise SystemExit(1)
 
